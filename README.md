@@ -2,21 +2,23 @@
 
 YOLO11 TensorRT deployment on Windows with Visual Studio 2019, CUDA, TensorRT 10, and OpenCV.
 
-This project provides a Windows-based TensorRT implementation for YOLO11 detection.  
-In addition to the original command-line inference program, this version provides a C++ detector API, allowing YOLO11 TensorRT inference to be called directly from other C++ programs using `cv::Mat`.
+This project provides Windows-based TensorRT inference for YOLO11. It keeps the original command-line demos and adds reusable C++ API wrappers so YOLO11 inference can be called directly from other C++ programs using `cv::Mat`.
 
 ## Features
 
 - YOLO11 detection TensorRT deployment on Windows
+- YOLO11 OBB oriented bounding box TensorRT deployment on Windows
 - TensorRT 10 API support
 - Visual Studio 2019 + CMake build
 - CUDA preprocessing
-- CPU post-processing and optional GPU post-processing path
+- CPU post-processing and optional GPU post-processing path for detection
 - Custom TensorRT plugin support through `myplugins.dll`
-- C++ detector API wrapper
-- Image inference demo
-- Video file inference demo
-- Camera real-time inference demo
+- C++ runtime API wrappers
+  - `Yolo11Detector`
+  - `Yolo11ObbDetector`
+- Image inference demos
+- Detection video / camera inference demo
+- OBB image inference demo
 
 ## Environment
 
@@ -48,17 +50,20 @@ D:\libs\opencv\build\x64\vc16\bin
 ```text
 yolo11-tensorrt-windows
 ├── api
-│   └── yolo11_detector_api.cpp
+│   ├── yolo11_detector_api.cpp
+│   └── yolo11_obb_api.cpp
 ├── examples
 │   ├── demo_image.cpp
-│   └── demo_video.cpp
+│   ├── demo_video.cpp
+│   └── demo_obb_image.cpp
 ├── include
 │   ├── config.h
 │   ├── model.h
 │   ├── postprocess.h
 │   ├── preprocess.h
 │   ├── utils.h
-│   └── yolo11_detector_api.h
+│   ├── yolo11_detector_api.h
+│   └── yolo11_obb_api.h
 ├── plugin
 │   └── yololayer.cu
 ├── src
@@ -68,21 +73,22 @@ yolo11-tensorrt-windows
 ├── images
 ├── gen_wts.py
 ├── yolo11_det.cpp
+├── yolo11_obb.cpp
 ├── CMakeLists.txt
 └── README.md
 ```
 
 ## Support
 
-| Task | C++ Command-Line Demo | C++ API Wrapper | Python TensorRT Demo |
-|---|---|---|---|
-| Detection | Supported | Supported | Supported |
-| Classification | Available in original code | Not wrapped yet | Supported |
-| Segmentation | Available in original code | Not wrapped yet | Supported |
-| Pose | Available in original code | Not wrapped yet | Supported |
-| OBB | Available in original code | Not wrapped yet | Supported |
+| Task | Original Command-Line Demo | C++ API Wrapper | Demo Program | Status |
+|---|---|---|---|---|
+| Detection | `yolo11_det.exe` | `Yolo11Detector` | `demo_image.exe`, `demo_video.exe` | Supported |
+| OBB | `yolo11_obb.exe` | `Yolo11ObbDetector` | `demo_obb_image.exe` | Supported, CPU post-processing verified |
+| Classification | Source code available | Planned | Planned | Not wrapped yet |
+| Segmentation | Source code available | Planned | Planned | Not wrapped yet |
+| Pose | Source code available | Planned | Planned | Not wrapped yet |
 
-The current C++ API wrapper focuses on YOLO11 detection.
+For OBB, CPU post-processing is the recommended validation path. The OBB GPU post-processing path is reserved for further completion and testing.
 
 ## Config
 
@@ -92,13 +98,19 @@ Main config file:
 include/config.h
 ```
 
-For custom detection models, set the class number correctly:
+For detection models trained on COCO, use:
 
 ```cpp
 const static int kNumClass = 80;
 ```
 
-Example for a one-class model:
+For official YOLO11 OBB models trained on DOTA, use:
+
+```cpp
+const static int kNumClass = 16;
+```
+
+For a custom one-class model, use:
 
 ```cpp
 const static int kNumClass = 1;
@@ -106,7 +118,7 @@ const static int kNumClass = 1;
 
 After modifying `config.h`, rebuild the project and regenerate the TensorRT engine.
 
-Do not reuse an old `.engine` file after changing class number, model structure, or TensorRT environment.
+Do not reuse an old `.engine` file after changing class number, model structure, TensorRT version, CUDA version, or GPU architecture.
 
 ## Build
 
@@ -128,7 +140,7 @@ If CMake cache already exists, delete:
 out/
 ```
 
-Then configure and build the project.
+Then configure and build the required targets.
 
 The executable files are usually generated in:
 
@@ -136,16 +148,50 @@ The executable files are usually generated in:
 out\build\x64-Debug
 ```
 
-Required runtime files:
+Common build targets:
 
 ```text
-yolo11_det.exe
-demo_image.exe
-demo_video.exe
+myplugins
+yolo11_det
+yolo11_obb
+demo_image
+demo_video
+demo_obb_image
+```
+
+Required runtime file:
+
+```text
 myplugins.dll
 ```
 
-`myplugins.dll` must be placed in the same directory as the executable files.
+`myplugins.dll` must be placed in the same directory as the executable files. The provided CMake configuration copies it automatically after build.
+
+## Download YOLO11 Models
+
+Example Python script:
+
+```python
+from pathlib import Path
+import os
+from ultralytics import YOLO
+
+models = [
+    "yolo11n.pt",
+    "yolo11n-obb.pt",
+]
+
+save_dir = Path("weights")
+save_dir.mkdir(exist_ok=True)
+os.chdir(save_dir)
+
+for model_name in models:
+    print(f"Loading: {model_name}")
+    model = YOLO(model_name)
+    print(Path(model_name).resolve())
+```
+
+Use `yolo11n.pt` for detection and `yolo11n-obb.pt` for OBB.
 
 ## Convert `.pt` to `.wts`
 
@@ -155,16 +201,28 @@ Enter the project directory:
 cd /d D:\tensorrtx\yolo11
 ```
 
-For official YOLO11n detection model:
+Detection model:
 
 ```bat
-python gen_wts.py -w yolo11n.pt -o yolo11n.wts -t detect
+python gen_wts.py -w weights/yolo11n.pt -o yolo11n.wts -t detect
 ```
 
-For custom detection model:
+OBB model:
 
 ```bat
-python gen_wts.py -w best.pt -o best.wts -t detect
+python gen_wts.py -w weights/yolo11n-obb.pt -o yolo11n-obb.wts -t obb
+```
+
+Custom detection model:
+
+```bat
+python gen_wts.py -w weights/best.pt -o best.wts -t detect
+```
+
+Custom OBB model:
+
+```bat
+python gen_wts.py -w weights/best.pt -o best-obb.wts -t obb
 ```
 
 If a `C3k2` error occurs, update Ultralytics:
@@ -175,16 +233,29 @@ python -m pip install -U ultralytics
 
 ## Build TensorRT Engine
 
+Copy `.wts` files to the executable directory:
+
+```bat
+copy /Y yolo11n.wts out\build\x64-Debug\
+copy /Y yolo11n-obb.wts out\build\x64-Debug\
+```
+
 Enter the executable directory:
 
 ```bat
 cd /d D:\tensorrtx\yolo11\out\build\x64-Debug
 ```
 
-Serialize engine from `.wts`:
+Build detection engine:
 
 ```bat
-yolo11_det.exe -s best.wts best.engine n
+yolo11_det.exe -s yolo11n.wts yolo11n.engine n
+```
+
+Build OBB engine:
+
+```bat
+yolo11_obb.exe -s yolo11n-obb.wts yolo11n-obb.engine n
 ```
 
 Model scale argument:
@@ -197,29 +268,19 @@ Model scale argument:
 | YOLO11l | `l` |
 | YOLO11x | `x` |
 
-Example:
-
-```bat
-yolo11_det.exe -s yolo11n.wts yolo11n.engine n
-```
-
-For a custom model trained from YOLO11n:
-
-```bat
-yolo11_det.exe -s best.wts best.engine n
-```
+For a custom model trained from YOLO11n, use `n` as the scale argument.
 
 ## Original Command-Line Inference
 
-The original command-line detection program is still available.
+### Detection
 
-Run inference on an image directory:
+Run detection on an image directory:
 
 ```bat
-yolo11_det.exe -d best.engine D:/tensorrtx/yolo11/images c
+yolo11_det.exe -d yolo11n.engine D:\tensorrtx\yolo11\images c
 ```
 
-The last argument controls the post-processing mode:
+The last argument controls post-processing mode:
 
 | Argument | Meaning |
 |---|---|
@@ -228,296 +289,213 @@ The last argument controls the post-processing mode:
 
 Results are saved in the executable directory.
 
-## C++ Detector API
+### OBB
 
-Include the detector API header:
+Run OBB inference on an image directory:
+
+```bat
+yolo11_obb.exe -d yolo11n-obb.engine D:\tensorrtx\yolo11\images c
+```
+
+Use `c` first to validate OBB inference. OBB test images should match the OBB model domain, such as aerial images from DOTA-like scenes.
+
+## C++ Detection API
+
+Header:
 
 ```cpp
 #include "yolo11_detector_api.h"
 ```
 
-Main class:
+Example:
 
 ```cpp
-yolo11::Yolo11Detector
-```
+yolo11::DetectorConfig config;
+config.engine_path = "yolo11n.engine";
+config.gpu_id = 0;
+config.use_gpu_postprocess = false;
 
-Basic usage:
+yolo11::Yolo11Detector detector;
 
-```cpp
-#include <opencv2/opencv.hpp>
-#include "yolo11_detector_api.h"
-
-int main() {
-    yolo11::DetectorConfig config;
-    config.engine_path = "best.engine";
-    config.gpu_id = 0;
-    config.use_gpu_postprocess = false;
-
-    yolo11::Yolo11Detector detector;
-
-    if (!detector.init(config)) {
-        return -1;
-    }
-
-    cv::Mat image = cv::imread("test.jpg");
-
-    auto detections = detector.infer(image);
-
-    cv::Mat result = detector.draw(image, detections);
-
-    cv::imwrite("result.jpg", result);
-
-    return 0;
+if (!detector.init(config)) {
+    return -1;
 }
+
+cv::Mat image = cv::imread("test.jpg");
+auto detections = detector.infer(image);
+cv::Mat result = detector.draw(image, detections);
+
+cv::imwrite("result.jpg", result);
+detector.release();
 ```
 
-Available API methods:
+Run image demo:
+
+```bat
+demo_image.exe yolo11n.engine D:\tensorrtx\yolo11\images\a.jpg det_result.jpg
+```
+
+Run video demo:
+
+```bat
+demo_video.exe yolo11n.engine D:\tensorrtx\yolo11\test.mp4 result_video.mp4
+```
+
+Run camera demo:
+
+```bat
+demo_video.exe yolo11n.engine 0
+```
+
+## C++ OBB API
+
+Header:
 
 ```cpp
-bool init(const DetectorConfig& config);
-
-std::vector<Detection> infer(const cv::Mat& image);
-
-std::vector<std::vector<Detection>> inferBatch(
-    const std::vector<cv::Mat>& images
-);
-
-cv::Mat draw(
-    const cv::Mat& image,
-    const std::vector<Detection>& detections
-);
-
-void release();
+#include "yolo11_obb_api.h"
 ```
 
-The API wraps:
+Example:
 
-- TensorRT engine loading
-- YOLO TensorRT plugin loading
-- CUDA stream creation
-- GPU buffer allocation
-- Image preprocessing
-- TensorRT inference
-- NMS post-processing
-- Bounding box drawing
-- Resource release
+```cpp
+yolo11::ObbConfig config;
+config.engine_path = "yolo11n-obb.engine";
+config.gpu_id = 0;
+config.use_gpu_postprocess = false;
 
-## Image Demo
+yolo11::Yolo11ObbDetector detector;
 
-Enter the executable directory:
+if (!detector.init(config)) {
+    return -1;
+}
+
+cv::Mat image = cv::imread("a.jpg");
+auto detections = detector.infer(image);
+cv::Mat result = detector.draw(image, detections);
+
+cv::imwrite("obb_result.jpg", result);
+detector.release();
+```
+
+Run OBB image demo:
 
 ```bat
-cd /d D:\tensorrtx\yolo11\out\build\x64-Debug
+demo_obb_image.exe yolo11n-obb.engine D:\tensorrtx\yolo11\images\a.jpg a_obb_result.jpg cpu
 ```
 
-Run image inference:
+The last argument controls OBB demo post-processing mode:
+
+| Argument | Meaning |
+|---|---|
+| `cpu` | CPU OBB post-processing |
+| `gpu` | GPU OBB post-processing path, experimental |
+
+Recommended validation command:
 
 ```bat
-demo_image.exe best.engine test.jpg
+demo_obb_image.exe yolo11n-obb.engine D:\tensorrtx\yolo11\images\a.jpg a_obb_result.jpg cpu
 ```
 
-Default output:
+A successful run prints messages similar to:
 
 ```text
-test_result.jpg
+myplugins.dll loaded successfully.
+TensorRT plugins initialized.
+Yolo11ObbDetector initialized successfully.
+kObbInputW = 1024, kObbInputH = 1024
+kNumClass = 16
+Detected OBB objects: 1
+Result saved to: a_obb_result.jpg
 ```
 
-Specify output path:
+## Minimal Commands
 
-```bat
-demo_image.exe best.engine test.jpg result.jpg
-```
-
-Absolute paths are recommended:
-
-```bat
-demo_image.exe "D:\tensorrtx\yolo11\out\build\x64-Debug\best.engine" "D:\tensorrtx\yolo11\out\build\x64-Debug\test.jpg"
-```
-
-## Video Demo
-
-Enter the executable directory:
-
-```bat
-cd /d D:\tensorrtx\yolo11\out\build\x64-Debug
-```
-
-Run video file inference:
-
-```bat
-demo_video.exe best.engine test.mp4
-```
-
-Specify output video path:
-
-```bat
-demo_video.exe best.engine test.mp4 result_video.mp4
-```
-
-Default output:
-
-```text
-result_video.mp4
-```
-
-## Camera Demo
-
-Run real-time camera inference:
-
-```bat
-demo_video.exe best.engine 0
-```
-
-`0` means the default camera index.
-
-Try another camera index if needed:
-
-```bat
-demo_video.exe best.engine 1
-```
-
-Press `q` or `Esc` to exit.
-
-## Common Problems
-
-### 1. Cannot open engine file
-
-Error:
-
-```text
-Cannot open engine file: best.engine
-```
-
-Reason:
-
-The `.engine` file is not in the current working directory.
-
-Solution:
-
-Use an absolute path:
-
-```bat
-demo_image.exe "D:\tensorrtx\yolo11\out\build\x64-Debug\best.engine" "D:\tensorrtx\yolo11\out\build\x64-Debug\test.jpg"
-```
-
-Or copy the engine file to the executable directory:
-
-```bat
-copy /Y "D:\tensorrtx\yolo11\best.engine" "D:\tensorrtx\yolo11\out\build\x64-Debug\best.engine"
-```
-
-### 2. Cannot find plugin: YoloLayer_TRT
-
-Error:
-
-```text
-Cannot find plugin: YoloLayer_TRT
-```
-
-Reason:
-
-`myplugins.dll` is not loaded correctly.
-
-Solution:
-
-Make sure `myplugins.dll` is in the same directory as:
-
-```text
-yolo11_det.exe
-demo_image.exe
-demo_video.exe
-```
-
-Also make sure the following paths are added to system `Path`:
-
-```text
-D:\GPU13.3\bin
-D:\TensorRT-10.16.1.11\bin
-D:\libs\opencv\build\x64\vc16\bin
-```
-
-### 3. Failed to read image
-
-Error:
-
-```text
-Failed to read image
-```
-
-Reason:
-
-The image path is wrong or the image file does not exist.
-
-Solution:
-
-Use an absolute image path:
-
-```bat
-demo_image.exe best.engine "D:\tensorrtx\yolo11\images\bus.jpg"
-```
-
-### 4. Camera cannot be opened
-
-Try another camera index:
-
-```bat
-demo_video.exe best.engine 1
-```
-
-Also make sure the camera is not used by another application.
-
-### 5. No detection results
-
-Check:
-
-1. `kNumClass` in `include/config.h`
-2. Whether the `.engine` file was regenerated after modifying `config.h`
-3. Whether the model scale argument is correct, such as `n`, `s`, `m`, `l`, or `x`
-4. Whether the confidence threshold is too high
-5. Whether the input image belongs to the trained classes
-
-## Minimal Workflow
+### Detection
 
 ```bat
 cd /d D:\tensorrtx\yolo11
 
-python gen_wts.py -w best.pt -o best.wts -t detect
+python gen_wts.py -w weights/yolo11n.pt -o yolo11n.wts -t detect
+copy /Y yolo11n.wts out\build\x64-Debug\
 
 cd /d D:\tensorrtx\yolo11\out\build\x64-Debug
 
-yolo11_det.exe -s best.wts best.engine n
+yolo11_det.exe -s yolo11n.wts yolo11n.engine n
+yolo11_det.exe -d yolo11n.engine D:\tensorrtx\yolo11\images c
 
-demo_image.exe best.engine test.jpg
-
-demo_video.exe best.engine test.mp4 result_video.mp4
-
-demo_video.exe best.engine 0
+demo_image.exe yolo11n.engine D:\tensorrtx\yolo11\images\a.jpg det_result.jpg
 ```
 
-## Custom Model Notes
+### OBB
 
-For a custom detection model:
+Before building OBB engine, set `kNumClass = 16` in `include/config.h` for the official DOTA OBB model, then rebuild the project.
 
-1. Prepare a YOLO11 detection `.pt` model.
-2. Convert `.pt` to `.wts`.
-3. Set `kNumClass` in `include/config.h`.
-4. Rebuild the project.
-5. Generate a new `.engine`.
-6. Run `demo_image.exe` or `demo_video.exe`.
+```bat
+cd /d D:\tensorrtx\yolo11
 
-Do not reuse an old TensorRT engine after changing:
+python gen_wts.py -w weights/yolo11n-obb.pt -o yolo11n-obb.wts -t obb
+copy /Y yolo11n-obb.wts out\build\x64-Debug\
 
-- class number
-- model scale
-- TensorRT version
-- CUDA version
-- plugin implementation
-- network structure
+cd /d D:\tensorrtx\yolo11\out\build\x64-Debug
+
+yolo11_obb.exe -s yolo11n-obb.wts yolo11n-obb.engine n
+yolo11_obb.exe -d yolo11n-obb.engine D:\tensorrtx\yolo11\images c
+
+demo_obb_image.exe yolo11n-obb.engine D:\tensorrtx\yolo11\images\a.jpg a_obb_result.jpg cpu
+```
+
+## Troubleshooting
+
+### `read xxx.engine error!`
+
+The engine file does not exist in the current executable directory, or the engine name is wrong. Use `dir *.engine` to check existing engine files.
+
+### `Detected OBB objects: 0`
+
+Common causes:
+
+- `kNumClass` is still `80`, but the OBB model expects `16` classes.
+- A detection engine is used with the OBB demo.
+- The test image does not match the OBB model domain.
+- Confidence threshold is too high.
+
+For debugging, you can lower the threshold in `include/config.h`:
+
+```cpp
+const static float kConfThresh = 0.25f;
+```
+
+Then rebuild and regenerate the engine.
+
+### `vector subscript out of range` when using `g`
+
+Use CPU post-processing for OBB validation:
+
+```bat
+yolo11_obb.exe -d yolo11n-obb.engine D:\tensorrtx\yolo11\images c
+```
+
+### `Failed to load myplugins.dll`
+
+Make sure `myplugins.dll` is in the same directory as the executable. The CMake build copies it automatically, but manual copying may be needed if the executable is moved.
+
+### `gen_wts.py` does not accept `-t obb`
+
+Update `gen_wts.py` so the type choices include `obb`:
+
+```python
+choices=['detect', 'cls', 'seg', 'pose', 'obb']
+```
+
+And make sure OBB is included in the YOLO-head branch:
+
+```python
+if m_type in ['detect', 'seg', 'pose', 'obb']:
+```
 
 ## Git Ignore
 
-Generated files should not be uploaded to GitHub:
+Do not upload generated files to GitHub:
 
 ```text
 out/
@@ -532,14 +510,8 @@ build/
 *.wts
 *.engine
 *.onnx
-*.mp4
-*.avi
 ```
-
-If sample images are required, place only small test images in the `images/` directory.
 
 ## Acknowledgement
 
-This project is modified from `tensorrtx/yolo11`.
-
-The detector API, image demo, video file demo, and camera demo were added for easier integration into Windows C++ applications.
+Modified from `tensorrtx/yolo11`.
