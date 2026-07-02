@@ -2,7 +2,7 @@
 
 本项目基于 `tensorrtx/yolo11` 进行 Windows 平台适配，用于在 **Visual Studio 2019 + CUDA + TensorRT + OpenCV** 环境下完成 YOLO11 目标检测模型的 C++ 部署、推理和后续 SDK 接口封装。
 
-本项目已成功跑通以下流程：
+项目流程：
 
 ```text
 yolo11n.pt / best.pt
@@ -23,8 +23,6 @@ yolo11_det.exe -d
 ---
 
 ## 1. 项目说明
-
-本项目修改自 `tensorrtx/yolo11`。原始 README 中的命令更偏向 Linux / Makefile 环境，例如 `wget`、`make`、`./yolo11_det` 等。本仓库已针对 **Windows + Visual Studio 2019** 进行了适配，因此实际构建与部署流程以本文档为准。
 
 当前重点验证的是：
 
