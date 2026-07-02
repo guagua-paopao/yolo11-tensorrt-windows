@@ -87,10 +87,14 @@ message(STATUS "OpenCV_LIBS = ${OpenCV_LIBS}")
 # =========================
 set(PROJECT_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/include")
 set(PROJECT_PLUGIN_DIR "${PROJECT_SOURCE_DIR}/plugin")
+set(PROJECT_API_DIR "${PROJECT_SOURCE_DIR}/api")
+set(PROJECT_EXAMPLES_DIR "${PROJECT_SOURCE_DIR}/examples")
 
 # =========================
 # Source files
-# 注意：这里只收集 src 下的公共源码，不包含 yolo11_det.cpp 这种带 main 的文件
+# 注意：
+# 这里只收集 src 下的公共源码。
+# 不要把 yolo11_det.cpp、yolo11_obb.cpp 这种带 main 的文件放进 SRCS。
 # =========================
 file(GLOB_RECURSE SRCS
     ${PROJECT_SOURCE_DIR}/src/*.cpp
@@ -111,10 +115,40 @@ function(copy_myplugins_to_target target_name)
 endfunction()
 
 # =========================
+# Helper function
+# 给 demo / exe 配置公共 include、compile definitions、link libraries
+# =========================
+function(config_yolo11_target target_name)
+    target_compile_definitions(${target_name} PRIVATE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+    )
+
+    target_include_directories(${target_name} PRIVATE
+        "${CUDA_INCLUDE_DIR}"
+        "${TENSORRT_INCLUDE_DIR}"
+        "${OpenCV_INCLUDE_DIRS}"
+        "${PROJECT_INCLUDE_DIR}"
+        "${PROJECT_PLUGIN_DIR}"
+    )
+
+    target_link_libraries(${target_name} PRIVATE
+        "${NVINFER_LIB}"
+        "${NVINFER_PLUGIN_LIB}"
+        "${CUDART_LIB}"
+        myplugins
+        ${OpenCV_LIBS}
+    )
+
+    add_dependencies(${target_name} myplugins)
+    copy_myplugins_to_target(${target_name})
+endfunction()
+
+# =========================
 # Plugin library
 # =========================
 add_library(myplugins SHARED
-    ${PROJECT_SOURCE_DIR}/plugin/yololayer.cu
+    ${PROJECT_PLUGIN_DIR}/yololayer.cu
 )
 
 target_compile_definitions(myplugins PRIVATE
@@ -145,36 +179,36 @@ add_executable(yolo11_det
     ${SRCS}
 )
 
-target_compile_definitions(yolo11_det PRIVATE
-    NOMINMAX
-    WIN32_LEAN_AND_MEAN
+config_yolo11_target(yolo11_det)
+
+# =========================
+# YOLO11 OBB original executable
+# 原始命令行版本：yolo11_obb.exe
+# 如果你暂时不需要原始 OBB 命令行程序，可以注释掉这一段。
+# =========================
+add_executable(yolo11_obb
+    ${PROJECT_SOURCE_DIR}/yolo11_obb.cpp
+    ${SRCS}
 )
 
-target_include_directories(yolo11_det PRIVATE
-    "${CUDA_INCLUDE_DIR}"
-    "${TENSORRT_INCLUDE_DIR}"
-    "${OpenCV_INCLUDE_DIRS}"
-    "${PROJECT_INCLUDE_DIR}"
-    "${PROJECT_PLUGIN_DIR}"
-)
-
-target_link_libraries(yolo11_det PRIVATE
-    "${NVINFER_LIB}"
-    "${NVINFER_PLUGIN_LIB}"
-    "${CUDART_LIB}"
-    myplugins
-    ${OpenCV_LIBS}
-)
-
-add_dependencies(yolo11_det myplugins)
-copy_myplugins_to_target(yolo11_det)
+config_yolo11_target(yolo11_obb)
 
 # =========================
 # YOLO11 Runtime API
 # 给外部 C++ 调用的静态库
+#
+# 当前先加入：
+#   yolo11_detector_api.cpp
+#   yolo11_obb_api.cpp
+#
+# 后面你完成 cls / pose / seg 后，再继续往这里加：
+#   ${PROJECT_API_DIR}/yolo11_classifier_api.cpp
+#   ${PROJECT_API_DIR}/yolo11_pose_api.cpp
+#   ${PROJECT_API_DIR}/yolo11_segmenter_api.cpp
 # =========================
 add_library(yolo11_runtime STATIC
-    ${PROJECT_SOURCE_DIR}/api/yolo11_detector_api.cpp
+    ${PROJECT_API_DIR}/yolo11_detector_api.cpp
+    ${PROJECT_API_DIR}/yolo11_obb_api.cpp
     ${SRCS}
 )
 
@@ -203,10 +237,10 @@ add_dependencies(yolo11_runtime myplugins)
 
 # =========================
 # Demo Image
-# 新接口图片测试程序
+# Detection 新接口图片测试程序：demo_image.exe
 # =========================
 add_executable(demo_image
-    ${PROJECT_SOURCE_DIR}/examples/demo_image.cpp
+    ${PROJECT_EXAMPLES_DIR}/demo_image.cpp
 )
 
 target_compile_definitions(demo_image PRIVATE
@@ -232,10 +266,10 @@ copy_myplugins_to_target(demo_image)
 
 # =========================
 # Demo Video
-# 新接口视频测试程序
+# Detection 新接口视频测试程序：demo_video.exe
 # =========================
 add_executable(demo_video
-    ${PROJECT_SOURCE_DIR}/examples/demo_video.cpp
+    ${PROJECT_EXAMPLES_DIR}/demo_video.cpp
 )
 
 target_compile_definitions(demo_video PRIVATE
@@ -258,3 +292,32 @@ target_link_libraries(demo_video PRIVATE
 
 add_dependencies(demo_video myplugins)
 copy_myplugins_to_target(demo_video)
+
+# =========================
+# Demo OBB Image
+# OBB 新接口图片测试程序：demo_obb_image.exe
+# =========================
+add_executable(demo_obb_image
+    ${PROJECT_EXAMPLES_DIR}/demo_obb_image.cpp
+)
+
+target_compile_definitions(demo_obb_image PRIVATE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+)
+
+target_include_directories(demo_obb_image PRIVATE
+    "${CUDA_INCLUDE_DIR}"
+    "${TENSORRT_INCLUDE_DIR}"
+    "${OpenCV_INCLUDE_DIRS}"
+    "${PROJECT_INCLUDE_DIR}"
+    "${PROJECT_PLUGIN_DIR}"
+)
+
+target_link_libraries(demo_obb_image PRIVATE
+    yolo11_runtime
+    myplugins
+)
+
+add_dependencies(demo_obb_image myplugins)
+copy_myplugins_to_target(demo_obb_image)
