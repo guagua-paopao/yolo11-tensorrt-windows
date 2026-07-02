@@ -90,11 +90,25 @@ set(PROJECT_PLUGIN_DIR "${PROJECT_SOURCE_DIR}/plugin")
 
 # =========================
 # Source files
+# 注意：这里只收集 src 下的公共源码，不包含 yolo11_det.cpp 这种带 main 的文件
 # =========================
 file(GLOB_RECURSE SRCS
     ${PROJECT_SOURCE_DIR}/src/*.cpp
     ${PROJECT_SOURCE_DIR}/src/*.cu
 )
+
+# =========================
+# Helper function
+# 编译后把 myplugins.dll 复制到目标 exe 所在目录
+# =========================
+function(copy_myplugins_to_target target_name)
+    add_custom_command(TARGET ${target_name} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:myplugins>
+            $<TARGET_FILE_DIR:${target_name}>
+        COMMENT "Copy myplugins.dll to $<TARGET_FILE_DIR:${target_name}>"
+    )
+endfunction()
 
 # =========================
 # Plugin library
@@ -123,7 +137,8 @@ target_link_libraries(myplugins PRIVATE
 )
 
 # =========================
-# YOLO11 Detection only
+# YOLO11 Detection original executable
+# 原始命令行版本：yolo11_det.exe
 # =========================
 add_executable(yolo11_det
     ${PROJECT_SOURCE_DIR}/yolo11_det.cpp
@@ -150,3 +165,96 @@ target_link_libraries(yolo11_det PRIVATE
     myplugins
     ${OpenCV_LIBS}
 )
+
+add_dependencies(yolo11_det myplugins)
+copy_myplugins_to_target(yolo11_det)
+
+# =========================
+# YOLO11 Runtime API
+# 给外部 C++ 调用的静态库
+# =========================
+add_library(yolo11_runtime STATIC
+    ${PROJECT_SOURCE_DIR}/api/yolo11_detector_api.cpp
+    ${SRCS}
+)
+
+target_compile_definitions(yolo11_runtime PRIVATE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+)
+
+target_include_directories(yolo11_runtime PUBLIC
+    "${CUDA_INCLUDE_DIR}"
+    "${TENSORRT_INCLUDE_DIR}"
+    "${OpenCV_INCLUDE_DIRS}"
+    "${PROJECT_INCLUDE_DIR}"
+    "${PROJECT_PLUGIN_DIR}"
+)
+
+target_link_libraries(yolo11_runtime PUBLIC
+    "${NVINFER_LIB}"
+    "${NVINFER_PLUGIN_LIB}"
+    "${CUDART_LIB}"
+    myplugins
+    ${OpenCV_LIBS}
+)
+
+add_dependencies(yolo11_runtime myplugins)
+
+# =========================
+# Demo Image
+# 新接口图片测试程序
+# =========================
+add_executable(demo_image
+    ${PROJECT_SOURCE_DIR}/examples/demo_image.cpp
+)
+
+target_compile_definitions(demo_image PRIVATE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+)
+
+target_include_directories(demo_image PRIVATE
+    "${CUDA_INCLUDE_DIR}"
+    "${TENSORRT_INCLUDE_DIR}"
+    "${OpenCV_INCLUDE_DIRS}"
+    "${PROJECT_INCLUDE_DIR}"
+    "${PROJECT_PLUGIN_DIR}"
+)
+
+target_link_libraries(demo_image PRIVATE
+    yolo11_runtime
+    myplugins
+)
+
+add_dependencies(demo_image myplugins)
+copy_myplugins_to_target(demo_image)
+
+# =========================
+# Demo Video
+# 新接口视频测试程序
+# =========================
+add_executable(demo_video
+    ${PROJECT_SOURCE_DIR}/examples/demo_video.cpp
+)
+
+target_compile_definitions(demo_video PRIVATE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+)
+
+target_include_directories(demo_video PRIVATE
+    "${CUDA_INCLUDE_DIR}"
+    "${TENSORRT_INCLUDE_DIR}"
+    "${OpenCV_INCLUDE_DIRS}"
+    "${PROJECT_INCLUDE_DIR}"
+    "${PROJECT_PLUGIN_DIR}"
+)
+
+target_link_libraries(demo_video PRIVATE
+    yolo11_runtime
+    myplugins
+)
+
+add_dependencies(demo_video myplugins)
+copy_myplugins_to_target(demo_video)
