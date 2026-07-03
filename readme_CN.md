@@ -5,15 +5,15 @@
 项目流程：
 
 ```text
-yolo11n.pt / best.pt
+yolo11n.pt
         ↓
 gen_wts.py
         ↓
-yolo11n.wts / best.wts
+yolo11n.wts
         ↓
 yolo11_det.exe -s
         ↓
-yolo11n.engine / best.engine
+yolo11n.engine
         ↓
 yolo11_det.exe -d
         ↓
