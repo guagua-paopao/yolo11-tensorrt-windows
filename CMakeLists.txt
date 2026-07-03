@@ -83,6 +83,16 @@ message(STATUS "OpenCV_INCLUDE_DIRS = ${OpenCV_INCLUDE_DIRS}")
 message(STATUS "OpenCV_LIBS = ${OpenCV_LIBS}")
 
 # =========================
+# Third-party libraries from vcpkg
+# 注意：
+# 配置 CMake 时必须带：
+# -DCMAKE_TOOLCHAIN_FILE=D:/vcpkg/scripts/buildsystems/vcpkg.cmake
+# =========================
+find_package(nlohmann_json CONFIG REQUIRED)
+find_package(yaml-cpp CONFIG REQUIRED)
+find_package(Crow CONFIG REQUIRED)
+
+# =========================
 # Project paths
 # =========================
 set(PROJECT_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/include")
@@ -95,11 +105,15 @@ set(PROJECT_EXAMPLES_DIR "${PROJECT_SOURCE_DIR}/examples")
 # 注意：
 # 这里只收集 src 下的公共源码。
 # 不要把 yolo11_det.cpp、yolo11_obb.cpp 这种带 main 的文件放进 SRCS。
+# 也不要把 src/server/*.cpp 放进 SRCS。
 # =========================
 file(GLOB_RECURSE SRCS
     ${PROJECT_SOURCE_DIR}/src/*.cpp
     ${PROJECT_SOURCE_DIR}/src/*.cu
 )
+
+# 关键：排除 server 源码，避免被 yolo11_det / yolo11_obb / yolo11_runtime 重复编译
+list(FILTER SRCS EXCLUDE REGEX ".*src[/\\\\]server[/\\\\].*")
 
 # =========================
 # Helper function
@@ -184,7 +198,6 @@ config_yolo11_target(yolo11_det)
 # =========================
 # YOLO11 OBB original executable
 # 原始命令行版本：yolo11_obb.exe
-# 如果你暂时不需要原始 OBB 命令行程序，可以注释掉这一段。
 # =========================
 add_executable(yolo11_obb
     ${PROJECT_SOURCE_DIR}/yolo11_obb.cpp
@@ -321,3 +334,37 @@ target_link_libraries(demo_obb_image PRIVATE
 
 add_dependencies(demo_obb_image myplugins)
 copy_myplugins_to_target(demo_obb_image)
+
+# ============================================================
+# Phase 1: YOLO11 pure C++ HTTP sync image detection server
+# 纯 C++ HTTP 同步图片检测服务
+# ============================================================
+add_executable(yolo11_server
+    ${PROJECT_SOURCE_DIR}/src/server/main_server.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/app_config.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/image_codec.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/result_serializer.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/http_controller.cpp
+)
+
+target_compile_definitions(yolo11_server PRIVATE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+)
+
+target_include_directories(yolo11_server PRIVATE
+    "${PROJECT_INCLUDE_DIR}"
+    "${PROJECT_PLUGIN_DIR}"
+)
+
+target_link_libraries(yolo11_server PRIVATE
+    yolo11_runtime
+    myplugins
+
+    nlohmann_json::nlohmann_json
+    yaml-cpp::yaml-cpp
+    Crow::Crow
+)
+
+add_dependencies(yolo11_server myplugins)
+copy_myplugins_to_target(yolo11_server)

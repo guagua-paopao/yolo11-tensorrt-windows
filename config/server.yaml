@@ -1,0 +1,15 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+  threads: 4
+
+model:
+  type: "detect"
+  engine_path: "./engines/yolo11n.engine"
+  gpu_id: 0
+  use_gpu_postprocess: false
+
+output:
+  save_result_image: true
+  output_dir: "./output"
+  jpeg_quality: 90
