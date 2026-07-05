@@ -5,11 +5,24 @@ server:
 
 model:
   type: "detect"
-  engine_path: "./engines/yolo11n.engine"
+  engine_path: "D:/tensorrtx/yolo11/engines/yolo11n.engine"
   gpu_id: 0
   use_gpu_postprocess: false
 
 output:
   save_result_image: true
+  input_dir: "./temp/input"
   output_dir: "./output"
   jpeg_quality: 90
+
+redis:
+  enabled: true
+  host: "172.19.196.109"
+  port: 6379
+  password: ""
+  db: 0
+  stream_key: "yolo:stream:detect"
+  consumer_group: "yolo11_group"
+  consumer_name: "worker_1"
+  block_ms: 500
+  ttl_seconds: 1800

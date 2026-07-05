@@ -3,11 +3,16 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -20,117 +25,36 @@ namespace yolo11_server {
 
     namespace {
 
-        // COCO 80 类类别名。
-        // 如果你后面换成自己的训练模型，比如焊缝缺陷、工业零件检测，
-        // 这里需要改成你自己的类别顺序。
+        std::mutex g_detector_mutex;
+
         const std::vector<std::string>& cocoClassNames() {
             static const std::vector<std::string> names = {
-                "person",
-                "bicycle",
-                "car",
-                "motorcycle",
-                "airplane",
-                "bus",
-                "train",
-                "truck",
-                "boat",
-                "traffic light",
-                "fire hydrant",
-                "stop sign",
-                "parking meter",
-                "bench",
-                "bird",
-                "cat",
-                "dog",
-                "horse",
-                "sheep",
-                "cow",
-                "elephant",
-                "bear",
-                "zebra",
-                "giraffe",
-                "backpack",
-                "umbrella",
-                "handbag",
-                "tie",
-                "suitcase",
-                "frisbee",
-                "skis",
-                "snowboard",
-                "sports ball",
-                "kite",
-                "baseball bat",
-                "baseball glove",
-                "skateboard",
-                "surfboard",
-                "tennis racket",
-                "bottle",
-                "wine glass",
-                "cup",
-                "fork",
-                "knife",
-                "spoon",
-                "bowl",
-                "banana",
-                "apple",
-                "sandwich",
-                "orange",
-                "broccoli",
-                "carrot",
-                "hot dog",
-                "pizza",
-                "donut",
-                "cake",
-                "chair",
-                "couch",
-                "potted plant",
-                "bed",
-                "dining table",
-                "toilet",
-                "tv",
-                "laptop",
-                "mouse",
-                "remote",
-                "keyboard",
-                "cell phone",
-                "microwave",
-                "oven",
-                "toaster",
-                "sink",
-                "refrigerator",
-                "book",
-                "clock",
-                "vase",
-                "scissors",
-                "teddy bear",
-                "hair drier",
-                "toothbrush"
+                "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+                "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog",
+                "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
+                "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite",
+                "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle",
+                "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich",
+                "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+                "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote",
+                "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book",
+                "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
             };
-
             return names;
         }
 
         std::string classNameFromId(int class_id) {
             const auto& names = cocoClassNames();
-
             if (class_id >= 0 && class_id < static_cast<int>(names.size())) {
                 return names[class_id];
             }
-
-            std::ostringstream oss;
-            oss << "class_" << class_id;
-            return oss.str();
+            return "class_" + std::to_string(class_id);
         }
 
         std::string toLowerString(std::string s) {
-            std::transform(
-                s.begin(),
-                s.end(),
-                s.begin(),
-                [](unsigned char c) {
-                    return static_cast<char>(std::tolower(c));
-                }
-            );
+            std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+                });
             return s;
         }
 
@@ -141,42 +65,26 @@ namespace yolo11_server {
         }
 
         bool isTrueString(const std::string& value) {
-            return value == "1" ||
-                value == "true" ||
-                value == "True" ||
-                value == "TRUE" ||
-                value == "yes" ||
-                value == "on";
+            const std::string v = toLowerString(value);
+            return v == "1" || v == "true" || v == "yes" || v == "on";
         }
 
-        // 判断 cv::Rect 是否贴到了图像边界。
-        // 注意：这不一定代表错误，很多目标本来就在图像边缘。
-        // 这个字段主要用于调试。
         bool rectTouchesImageBoundary(const cv::Rect& rect, const cv::Mat& image) {
             if (image.empty()) {
                 return true;
             }
-
             if (rect.x <= 0 || rect.y <= 0) {
                 return true;
             }
-
             if (rect.x + rect.width >= image.cols) {
                 return true;
             }
-
             if (rect.y + rect.height >= image.rows) {
                 return true;
             }
-
             return false;
         }
 
-        // 将 Detection 结果序列化为原图像素坐标。
-        // 关键点：这里不再假设 detection.bbox 是 xywh。
-        // 当前项目的后处理和画框函数使用 get_rect(img, bbox)
-        // 将模型/letterbox 坐标还原到原图坐标。
-        // 为了让 JSON 坐标和结果图画框完全一致，这里直接复用 get_rect()。
         nlohmann::json detectionsToJsonForImage(
             const std::vector<Detection>& detections,
             const cv::Mat& image,
@@ -185,10 +93,7 @@ namespace yolo11_server {
             nlohmann::json arr = nlohmann::json::array();
 
             for (const auto& detection : detections) {
-                // get_rect 的参数是 cv::Mat& 和 float bbox[4]，所以这里做两个临时拷贝。
-                // get_rect 当前不会修改 bbox，但函数签名不是 const。
                 cv::Mat image_for_rect = image;
-
                 float bbox_for_rect[4] = {
                     detection.bbox[0],
                     detection.bbox[1],
@@ -204,14 +109,12 @@ namespace yolo11_server {
                 const int h = rect.height;
                 const int x2 = rect.x + rect.width;
                 const int y2 = rect.y + rect.height;
-
                 const int class_id = static_cast<int>(detection.class_id);
 
                 nlohmann::json item;
                 item["class_id"] = class_id;
                 item["class_name"] = classNameFromId(class_id);
                 item["confidence"] = detection.conf;
-
                 item["bbox"] = {
                     {"x", x1},
                     {"y", y1},
@@ -222,13 +125,8 @@ namespace yolo11_server {
                     {"x2", x2},
                     {"y2", y2}
                 };
-
-                // 为了兼容你之前的字段名，先继续叫 clipped。
-                // 真实含义：最终还原后的 rect 是否碰到图像边界。
                 item["clipped"] = rectTouchesImageBoundary(rect, image);
 
-                // debug=true 或 debug=1 时才返回模型原始坐标。
-                // 正式接口默认不返回，避免前端混淆两套坐标。
                 if (debug) {
                     item["raw_model_bbox"] = {
                         {"x1", detection.bbox[0]},
@@ -244,10 +142,54 @@ namespace yolo11_server {
             return arr;
         }
 
+        std::string readWholeFileBinary(const std::string& path) {
+            std::ifstream file(path, std::ios::binary);
+            if (!file.is_open()) {
+                return {};
+            }
+            std::ostringstream buffer;
+            buffer << file.rdbuf();
+            return buffer.str();
+        }
+
+        bool writeBytesToFile(const std::string& path, const std::string& bytes) {
+            std::ofstream file(path, std::ios::binary);
+            if (!file.is_open()) {
+                return false;
+            }
+            file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            return file.good();
+        }
+
     }  // namespace
 
     HttpController::HttpController(const AppConfig& config, yolo11::Yolo11Detector& detector)
-        : config_(config), detector_(detector) {
+        : config_(config), detector_(detector), redis_queue_(config.redis) {
+        std::filesystem::create_directories(config_.output.input_dir);
+        std::filesystem::create_directories(config_.output.output_dir);
+
+        if (config_.redis.enabled) {
+            std::string error;
+            if (!redis_queue_.connect(error)) {
+                throw std::runtime_error("failed to connect Redis: " + error);
+            }
+            redis_mode_ = true;
+            std::cout << "Redis queue enabled: "
+                << config_.redis.host << ":" << config_.redis.port
+                << ", stream=" << config_.redis.stream_key
+                << ", group=" << config_.redis.consumer_group
+                << std::endl;
+        }
+        else {
+            redis_mode_ = false;
+            std::cout << "Redis queue disabled. Use local in-memory async queue." << std::endl;
+        }
+
+        startWorker();
+    }
+
+    HttpController::~HttpController() {
+        stopWorker();
     }
 
     void HttpController::registerRoutes(crow::SimpleApp& app) {
@@ -263,8 +205,18 @@ namespace yolo11_server {
             return handleDetectImage(request);
                 });
 
-        // 访问检测结果图：
-        // http://127.0.0.1:8080/api/v1/image/result_xxx.jpg
+        CROW_ROUTE(app, "/api/v1/detect/image/async")
+            .methods(crow::HTTPMethod::POST)
+            ([this](const crow::request& request) {
+            return handleDetectImageAsync(request);
+                });
+
+        CROW_ROUTE(app, "/api/v1/result/<string>")
+            .methods(crow::HTTPMethod::GET)
+            ([this](const std::string& task_id) {
+            return handleGetAsyncResult(task_id);
+                });
+
         CROW_ROUTE(app, "/api/v1/image/<string>")
             .methods(crow::HTTPMethod::GET)
             ([this](const std::string& filename) {
@@ -277,11 +229,32 @@ namespace yolo11_server {
         body["success"] = true;
         body["status"] = "ok";
         body["service"] = "yolo11_server";
-        body["phase"] = "phase1_sync_http";
+        body["phase"] = redis_mode_ ? "phase2_redis_stream_queue" : "phase1_5_async_local_queue";
         body["model_type"] = config_.model.type;
         body["engine_path"] = config_.model.engine_path;
         body["gpu_id"] = config_.model.gpu_id;
         body["use_gpu_postprocess"] = config_.model.use_gpu_postprocess;
+        body["async_worker"] = worker_running_.load() ? "running" : "stopped";
+        body["queue_backend"] = redis_mode_ ? "redis_stream" : "local_memory";
+
+        if (redis_mode_) {
+            std::string redis_error;
+            body["redis_enabled"] = true;
+            body["redis_host"] = config_.redis.host;
+            body["redis_port"] = config_.redis.port;
+            body["redis_stream_key"] = config_.redis.stream_key;
+            body["redis_consumer_group"] = config_.redis.consumer_group;
+            body["redis_ping"] = redis_queue_.ping(redis_error) ? "ok" : "failed";
+            if (!redis_error.empty()) {
+                body["redis_error"] = redis_error;
+            }
+        }
+        else {
+            std::lock_guard<std::mutex> lock(task_mutex_);
+            body["redis_enabled"] = false;
+            body["task_count"] = tasks_.size();
+            body["pending_count"] = pending_task_ids_.size();
+        }
 
         return makeJsonResponse(200, body);
     }
@@ -300,7 +273,6 @@ namespace yolo11_server {
         }
 
         cv::Mat image = ImageCodec::decodeImageBytes(image_bytes);
-
         if (image.empty()) {
             nlohmann::json body;
             body["success"] = false;
@@ -311,7 +283,6 @@ namespace yolo11_server {
         const int image_width = image.cols;
         const int image_height = image.rows;
         const int image_channels = image.channels();
-
         const bool draw = isTrueParam(request.url_params.get("draw"));
         const bool debug = isTrueParam(request.url_params.get("debug"));
 
@@ -319,33 +290,27 @@ namespace yolo11_server {
         cv::Mat result_image;
 
         auto t0 = std::chrono::steady_clock::now();
-
         {
-            std::lock_guard<std::mutex> lock(detector_mutex_);
-
+            std::lock_guard<std::mutex> lock(g_detector_mutex);
             detections = detector_.infer(image);
-
             if (draw || config_.output.save_result_image) {
                 result_image = detector_.draw(image, detections);
             }
         }
-
         auto t1 = std::chrono::steady_clock::now();
 
-        const double infer_ms =
-            std::chrono::duration<double, std::milli>(t1 - t0).count();
+        const double infer_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
         nlohmann::json body;
         body["success"] = true;
         body["request_id"] = request_id;
+        body["status"] = "done";
         body["model_type"] = config_.model.type;
-
         body["image"] = {
             {"width", image_width},
             {"height", image_height},
             {"channels", image_channels}
         };
-
         body["bbox_coordinate_system"] = "original_image_pixels";
         body["bbox_format"] = "xywh_and_xyxy";
         body["num_detections"] = detections.size();
@@ -356,35 +321,23 @@ namespace yolo11_server {
             body["debug_note"] = "raw_model_bbox is returned only when debug=true or debug=1.";
         }
 
-        // 使用 get_rect() 将模型输出 bbox 还原为原图坐标，
-        // 保证 JSON 坐标和结果图中的画框一致。
-        body["detections"] = detectionsToJsonForImage(
-            detections,
-            image,
-            debug
-        );
+        body["detections"] = detectionsToJsonForImage(detections, image, debug);
 
         if (config_.output.save_result_image && !result_image.empty()) {
             try {
                 std::filesystem::create_directories(config_.output.output_dir);
-
                 const std::string output_filename = makeResultImageFilename(request_id);
                 const std::string output_path = makeResultImagePath(output_filename);
-
-                bool ok = cv::imwrite(output_path, result_image);
-
+                std::vector<int> params = { cv::IMWRITE_JPEG_QUALITY, config_.output.jpeg_quality };
+                bool ok = cv::imwrite(output_path, result_image, params);
                 if (ok) {
-                    const std::string relative_url =
-                        "/api/v1/image/" + output_filename;
-
+                    const std::string relative_url = "/api/v1/image/" + output_filename;
                     body["saved_result_image"] = output_path;
                     body["result_image_filename"] = output_filename;
                     body["result_image_url"] = relative_url;
-
                     const std::string host = request.get_header_value("Host");
                     if (!host.empty()) {
-                        body["result_image_url_full"] =
-                            "http://" + host + relative_url;
+                        body["result_image_url_full"] = "http://" + host + relative_url;
                     }
                 }
                 else {
@@ -401,6 +354,159 @@ namespace yolo11_server {
         return makeJsonResponse(200, body);
     }
 
+    crow::response HttpController::handleDetectImageAsync(const crow::request& request) {
+        std::string error_message;
+        std::string image_bytes = extractImageBytes(request, error_message);
+
+        if (image_bytes.empty()) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error"] = error_message.empty() ? "empty image body" : error_message;
+            return makeJsonResponse(400, body);
+        }
+
+        cv::Mat image = ImageCodec::decodeImageBytes(image_bytes);
+        if (image.empty()) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error"] = "failed to decode image. Please upload a valid jpg/png image.";
+            return makeJsonResponse(400, body);
+        }
+
+        const std::string task_id = makeTaskId();
+        const std::string input_path = makeInputImagePath(task_id);
+        std::filesystem::create_directories(config_.output.input_dir);
+
+        if (!writeBytesToFile(input_path, image_bytes)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error"] = "failed to save input image";
+            return makeJsonResponse(500, body);
+        }
+
+        const long long create_time_ms = nowMs();
+
+        if (redis_mode_) {
+            RedisTask task;
+            task.task_id = task_id;
+            task.input_image_path = input_path;
+            task.create_time_ms = create_time_ms;
+
+            std::string redis_error;
+            if (!redis_queue_.submitTask(task, redis_error)) {
+                nlohmann::json body;
+                body["success"] = false;
+                body["error"] = "failed to submit task to Redis";
+                body["redis_error"] = redis_error;
+                return makeJsonResponse(500, body);
+            }
+        }
+        else {
+            AsyncTaskRecord task;
+            task.task_id = task_id;
+            task.status = "queued";
+            task.input_image_path = input_path;
+            task.create_time_ms = create_time_ms;
+            pushTask(task);
+        }
+
+        nlohmann::json body;
+        body["success"] = true;
+        body["task_id"] = task_id;
+        body["status"] = "queued";
+        body["queue_backend"] = redis_mode_ ? "redis_stream" : "local_memory";
+        body["result_url"] = "/api/v1/result/" + task_id;
+
+        return makeJsonResponse(202, body);
+    }
+
+    crow::response HttpController::handleGetAsyncResult(const std::string& task_id) const {
+        if (redis_mode_) {
+            RedisTaskStatus task_status;
+            std::string redis_error;
+            if (!redis_queue_.getTaskStatus(task_id, task_status, redis_error)) {
+                nlohmann::json body;
+                body["success"] = false;
+                body["error"] = "failed to query Redis task status";
+                body["redis_error"] = redis_error;
+                body["task_id"] = task_id;
+                return makeJsonResponse(500, body);
+            }
+
+            if (!task_status.found) {
+                nlohmann::json body;
+                body["success"] = false;
+                body["error"] = "task not found or expired";
+                body["task_id"] = task_id;
+                return makeJsonResponse(404, body);
+            }
+
+            if (task_status.status == "done" && !task_status.result_json_text.empty()) {
+                crow::response response(200, task_status.result_json_text);
+                response.set_header("Content-Type", "application/json; charset=utf-8");
+                return response;
+            }
+
+            nlohmann::json body;
+            body["success"] = task_status.status != "failed";
+            body["task_id"] = task_status.task_id;
+            body["status"] = task_status.status;
+            body["queue_backend"] = "redis_stream";
+            body["create_time_ms"] = task_status.create_time_ms;
+            body["start_time_ms"] = task_status.start_time_ms;
+            body["finish_time_ms"] = task_status.finish_time_ms;
+
+            if (!task_status.error.empty()) {
+                body["error"] = task_status.error;
+            }
+            if (!task_status.result_image_filename.empty()) {
+                body["result_image_filename"] = task_status.result_image_filename;
+                body["result_image_url"] = "/api/v1/image/" + task_status.result_image_filename;
+            }
+
+            return makeJsonResponse(200, body);
+        }
+
+        AsyncTaskRecord task;
+        {
+            std::lock_guard<std::mutex> lock(task_mutex_);
+            auto it = tasks_.find(task_id);
+            if (it == tasks_.end()) {
+                nlohmann::json body;
+                body["success"] = false;
+                body["error"] = "task not found or expired";
+                body["task_id"] = task_id;
+                return makeJsonResponse(404, body);
+            }
+            task = it->second;
+        }
+
+        if (task.status == "done" && !task.result_json_text.empty()) {
+            crow::response response(200, task.result_json_text);
+            response.set_header("Content-Type", "application/json; charset=utf-8");
+            return response;
+        }
+
+        nlohmann::json body;
+        body["success"] = task.status != "failed";
+        body["task_id"] = task.task_id;
+        body["status"] = task.status;
+        body["queue_backend"] = "local_memory";
+        body["create_time_ms"] = task.create_time_ms;
+        body["start_time_ms"] = task.start_time_ms;
+        body["finish_time_ms"] = task.finish_time_ms;
+
+        if (!task.error.empty()) {
+            body["error"] = task.error;
+        }
+        if (!task.result_image_filename.empty()) {
+            body["result_image_filename"] = task.result_image_filename;
+            body["result_image_url"] = "/api/v1/image/" + task.result_image_filename;
+        }
+
+        return makeJsonResponse(200, body);
+    }
+
     crow::response HttpController::handleGetResultImage(const std::string& filename) const {
         if (!isSafeImageFilename(filename)) {
             nlohmann::json body;
@@ -410,10 +516,9 @@ namespace yolo11_server {
         }
 
         const std::string image_path = makeResultImagePath(filename);
+        std::string bytes = readWholeFileBinary(image_path);
 
-        std::ifstream file(image_path, std::ios::binary);
-
-        if (!file.is_open()) {
+        if (bytes.empty()) {
             nlohmann::json body;
             body["success"] = false;
             body["error"] = "image not found";
@@ -421,45 +526,33 @@ namespace yolo11_server {
             return makeJsonResponse(404, body);
         }
 
-        std::ostringstream buffer;
-        buffer << file.rdbuf();
-
         crow::response response;
         response.code = 200;
-        response.body = buffer.str();
+        response.body = bytes;
         response.set_header("Content-Type", guessImageContentType(filename));
         response.set_header("Cache-Control", "no-store");
-
         return response;
     }
 
-    std::string HttpController::extractImageBytes(
-        const crow::request& request,
-        std::string& error_message
-    ) const {
+    std::string HttpController::extractImageBytes(const crow::request& request, std::string& error_message) const {
         const std::string content_type = request.get_header_value("Content-Type");
 
-        // 1) multipart/form-data: file=@xxx.jpg
         if (content_type.find("multipart/form-data") != std::string::npos) {
             try {
                 crow::multipart::message multipart_message(request);
                 auto part = multipart_message.get_part_by_name("file");
-
                 if (part.body.empty()) {
                     error_message = "multipart field 'file' is empty or not found";
                     return {};
                 }
-
                 return part.body;
             }
             catch (const std::exception& e) {
-                error_message =
-                    std::string("failed to parse multipart/form-data: ") + e.what();
+                error_message = std::string("failed to parse multipart/form-data: ") + e.what();
                 return {};
             }
         }
 
-        // 2) raw body: Content-Type: image/jpeg or image/png
         if (content_type.find("image/jpeg") != std::string::npos ||
             content_type.find("image/jpg") != std::string::npos ||
             content_type.find("image/png") != std::string::npos ||
@@ -467,13 +560,11 @@ namespace yolo11_server {
             return request.body;
         }
 
-        // 3) fallback: still try to decode body if user did not set Content-Type correctly.
         if (!request.body.empty()) {
             return request.body;
         }
 
-        error_message =
-            "request body is empty. Use multipart field name 'file' or raw jpg/png bytes.";
+        error_message = "request body is empty. Use multipart field name 'file' or raw jpg/png bytes.";
         return {};
     }
 
@@ -481,82 +572,355 @@ namespace yolo11_server {
         if (value == nullptr) {
             return false;
         }
-
         return isTrueString(std::string(value));
     }
 
-    std::string HttpController::makeResultImageFilename(
-        unsigned long long request_id
-    ) const {
-        auto now = std::chrono::system_clock::now().time_since_epoch();
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    std::string HttpController::makeTaskId() {
+        auto now = std::chrono::system_clock::now();
+        auto now_time_t = std::chrono::system_clock::to_time_t(now);
+        std::tm tm_value{};
+
+#ifdef _WIN32
+        localtime_s(&tm_value, &now_time_t);
+#else
+        localtime_r(&now_time_t, &tm_value);
+#endif
 
         std::ostringstream oss;
-        oss << "result_" << ms << "_" << request_id << ".jpg";
-
+        oss << std::put_time(&tm_value, "%Y%m%d_%H%M%S")
+            << "_" << ++task_counter_;
         return oss.str();
     }
 
-    std::string HttpController::makeResultImagePath(
-        const std::string& filename
-    ) const {
+    std::string HttpController::makeResultImageFilename(unsigned long long request_id) const {
+        auto now = std::chrono::system_clock::now().time_since_epoch();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+        std::ostringstream oss;
+        oss << "result_" << ms << "_" << request_id << ".jpg";
+        return oss.str();
+    }
+
+    std::string HttpController::makeResultImageFilename(const std::string& task_id) const {
+        return task_id + "_result.jpg";
+    }
+
+    std::string HttpController::makeInputImagePath(const std::string& task_id) const {
+        std::filesystem::path input_dir(config_.output.input_dir);
+        return (input_dir / (task_id + ".jpg")).string();
+    }
+
+    std::string HttpController::makeResultImagePath(const std::string& filename) const {
         std::filesystem::path output_dir(config_.output.output_dir);
         std::filesystem::path image_path = output_dir / filename;
-
         return image_path.string();
     }
 
-    bool HttpController::isSafeImageFilename(
-        const std::string& filename
-    ) const {
+    bool HttpController::isSafeImageFilename(const std::string& filename) const {
         if (filename.empty()) {
             return false;
         }
-
-        // 禁止路径穿越，比如 ../xxx.jpg
         if (filename.find("..") != std::string::npos) {
             return false;
         }
-
-        // 禁止带路径分隔符，只允许访问 output_dir 下的单个文件名。
-        if (filename.find('/') != std::string::npos ||
-            filename.find('\\') != std::string::npos) {
+        if (filename.find('/') != std::string::npos || filename.find('\\') != std::string::npos) {
             return false;
         }
 
         const std::string lower = toLowerString(filename);
-
-        const bool is_jpg =
-            lower.size() >= 4 &&
-            lower.substr(lower.size() - 4) == ".jpg";
-
-        const bool is_jpeg =
-            lower.size() >= 5 &&
-            lower.substr(lower.size() - 5) == ".jpeg";
-
-        const bool is_png =
-            lower.size() >= 4 &&
-            lower.substr(lower.size() - 4) == ".png";
-
+        const bool is_jpg = lower.size() >= 4 && lower.substr(lower.size() - 4) == ".jpg";
+        const bool is_jpeg = lower.size() >= 5 && lower.substr(lower.size() - 5) == ".jpeg";
+        const bool is_png = lower.size() >= 4 && lower.substr(lower.size() - 4) == ".png";
         return is_jpg || is_jpeg || is_png;
     }
 
-    std::string HttpController::guessImageContentType(
-        const std::string& filename
-    ) const {
+    std::string HttpController::guessImageContentType(const std::string& filename) const {
         const std::string lower = toLowerString(filename);
-
-        if (lower.size() >= 4 &&
-            lower.substr(lower.size() - 4) == ".png") {
+        if (lower.size() >= 4 && lower.substr(lower.size() - 4) == ".png") {
             return "image/png";
         }
+        return "image/jpeg";
+    }
 
-        if (lower.size() >= 5 &&
-            lower.substr(lower.size() - 5) == ".jpeg") {
-            return "image/jpeg";
+    void HttpController::startWorker() {
+        if (worker_running_.load()) {
+            return;
+        }
+        worker_running_ = true;
+        worker_thread_ = std::thread([this]() {
+            workerLoop();
+            });
+    }
+
+    void HttpController::stopWorker() {
+        if (!worker_running_.load()) {
+            return;
+        }
+        worker_running_ = false;
+        task_cv_.notify_all();
+        if (worker_thread_.joinable()) {
+            worker_thread_.join();
+        }
+    }
+
+    void HttpController::pushTask(const AsyncTaskRecord& task) {
+        {
+            std::lock_guard<std::mutex> lock(task_mutex_);
+            tasks_[task.task_id] = task;
+            pending_task_ids_.push(task.task_id);
+        }
+        task_cv_.notify_one();
+    }
+
+    bool HttpController::popTask(std::string& task_id) {
+        std::unique_lock<std::mutex> lock(task_mutex_);
+        task_cv_.wait(lock, [this]() {
+            return !worker_running_.load() || !pending_task_ids_.empty();
+            });
+
+        if (!worker_running_.load() && pending_task_ids_.empty()) {
+            return false;
         }
 
-        return "image/jpeg";
+        task_id = pending_task_ids_.front();
+        pending_task_ids_.pop();
+        return true;
+    }
+
+    void HttpController::workerLoop() {
+        std::cout << "Async inference worker started. backend="
+            << (redis_mode_ ? "redis_stream" : "local_memory") << std::endl;
+
+        while (worker_running_.load()) {
+            if (redis_mode_) {
+                RedisTask task;
+                std::string error;
+                if (!redis_queue_.popTask(task, error)) {
+                    if (!error.empty()) {
+                        std::cerr << "Redis popTask failed: " << error << std::endl;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                    }
+                    continue;
+                }
+                processRedisTask(task);
+            }
+            else {
+                std::string task_id;
+                if (!popTask(task_id)) {
+                    break;
+                }
+                processLocalTask(task_id);
+            }
+        }
+
+        std::cout << "Async inference worker stopped." << std::endl;
+    }
+
+    void HttpController::processLocalTask(const std::string& task_id) {
+        AsyncTaskRecord task;
+        {
+            std::lock_guard<std::mutex> lock(task_mutex_);
+            auto it = tasks_.find(task_id);
+            if (it == tasks_.end()) {
+                return;
+            }
+            it->second.status = "running";
+            it->second.start_time_ms = nowMs();
+            task = it->second;
+        }
+
+        try {
+            cv::Mat image = cv::imread(task.input_image_path, cv::IMREAD_COLOR);
+            if (image.empty()) {
+                throw std::runtime_error("worker failed to read input image");
+            }
+
+            std::vector<Detection> detections;
+            cv::Mat result_image;
+            auto t0 = std::chrono::steady_clock::now();
+
+            {
+                std::lock_guard<std::mutex> lock(g_detector_mutex);
+                detections = detector_.infer(image);
+                if (config_.output.save_result_image) {
+                    result_image = detector_.draw(image, detections);
+                }
+            }
+
+            auto t1 = std::chrono::steady_clock::now();
+            const double infer_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+            std::string result_image_url;
+            if (config_.output.save_result_image && !result_image.empty()) {
+                std::filesystem::create_directories(config_.output.output_dir);
+                task.result_image_filename = makeResultImageFilename(task.task_id);
+                task.result_image_path = makeResultImagePath(task.result_image_filename);
+                std::vector<int> params = { cv::IMWRITE_JPEG_QUALITY, config_.output.jpeg_quality };
+                if (cv::imwrite(task.result_image_path, result_image, params)) {
+                    result_image_url = "/api/v1/image/" + task.result_image_filename;
+                }
+            }
+
+            nlohmann::json body;
+            body["success"] = true;
+            body["task_id"] = task.task_id;
+            body["status"] = "done";
+            body["queue_backend"] = "local_memory";
+            body["model_type"] = config_.model.type;
+            body["image"] = {
+                {"width", image.cols},
+                {"height", image.rows},
+                {"channels", image.channels()}
+            };
+            body["bbox_coordinate_system"] = "original_image_pixels";
+            body["bbox_format"] = "xywh_and_xyxy";
+            body["num_detections"] = detections.size();
+            body["inference_ms"] = infer_ms;
+            body["detections"] = detectionsToJsonForImage(detections, image, false);
+            if (!result_image_url.empty()) {
+                body["result_image_filename"] = task.result_image_filename;
+                body["result_image_url"] = result_image_url;
+            }
+
+            task.status = "done";
+            task.finish_time_ms = nowMs();
+            task.result_json_text = body.dump(4);
+
+            {
+                std::lock_guard<std::mutex> lock(task_mutex_);
+                tasks_[task.task_id] = task;
+            }
+
+            std::cout << "Task done: " << task.task_id
+                << ", detections=" << detections.size()
+                << ", infer_ms=" << infer_ms
+                << std::endl;
+        }
+        catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lock(task_mutex_);
+            auto it = tasks_.find(task_id);
+            if (it != tasks_.end()) {
+                it->second.status = "failed";
+                it->second.error = e.what();
+                it->second.finish_time_ms = nowMs();
+            }
+            std::cerr << "Task failed: " << task_id << ", error=" << e.what() << std::endl;
+        }
+    }
+
+    void HttpController::processRedisTask(const RedisTask& task) {
+        std::string redis_error;
+        if (!redis_queue_.markRunning(task.task_id, nowMs(), redis_error)) {
+            std::cerr << "Redis markRunning failed: task_id=" << task.task_id
+                << ", error=" << redis_error << std::endl;
+        }
+
+        try {
+            cv::Mat image = cv::imread(task.input_image_path, cv::IMREAD_COLOR);
+            if (image.empty()) {
+                throw std::runtime_error("worker failed to read input image");
+            }
+
+            std::vector<Detection> detections;
+            cv::Mat result_image;
+            auto t0 = std::chrono::steady_clock::now();
+
+            {
+                std::lock_guard<std::mutex> lock(g_detector_mutex);
+                detections = detector_.infer(image);
+                if (config_.output.save_result_image) {
+                    result_image = detector_.draw(image, detections);
+                }
+            }
+
+            auto t1 = std::chrono::steady_clock::now();
+            const double infer_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+            std::string result_image_filename;
+            std::string result_image_path;
+            std::string result_image_url;
+
+            if (config_.output.save_result_image && !result_image.empty()) {
+                std::filesystem::create_directories(config_.output.output_dir);
+                result_image_filename = makeResultImageFilename(task.task_id);
+                result_image_path = makeResultImagePath(result_image_filename);
+                std::vector<int> params = { cv::IMWRITE_JPEG_QUALITY, config_.output.jpeg_quality };
+                if (cv::imwrite(result_image_path, result_image, params)) {
+                    result_image_url = "/api/v1/image/" + result_image_filename;
+                }
+                else {
+                    result_image_filename.clear();
+                    result_image_path.clear();
+                }
+            }
+
+            nlohmann::json body;
+            body["success"] = true;
+            body["task_id"] = task.task_id;
+            body["status"] = "done";
+            body["queue_backend"] = "redis_stream";
+            body["model_type"] = config_.model.type;
+            body["image"] = {
+                {"width", image.cols},
+                {"height", image.rows},
+                {"channels", image.channels()}
+            };
+            body["bbox_coordinate_system"] = "original_image_pixels";
+            body["bbox_format"] = "xywh_and_xyxy";
+            body["num_detections"] = detections.size();
+            body["inference_ms"] = infer_ms;
+            body["detections"] = detectionsToJsonForImage(detections, image, false);
+            if (!result_image_url.empty()) {
+                body["result_image_filename"] = result_image_filename;
+                body["result_image_url"] = result_image_url;
+            }
+
+            const long long finish_time_ms = nowMs();
+            const std::string result_json_text = body.dump(4);
+
+            redis_error.clear();
+            if (!redis_queue_.markDone(
+                task.task_id,
+                result_json_text,
+                result_image_path,
+                result_image_filename,
+                finish_time_ms,
+                redis_error)) {
+                std::cerr << "Redis markDone failed: task_id=" << task.task_id
+                    << ", error=" << redis_error << std::endl;
+            }
+
+            redis_error.clear();
+            if (!redis_queue_.ackTask(task.stream_id, redis_error)) {
+                std::cerr << "Redis ackTask failed: stream_id=" << task.stream_id
+                    << ", error=" << redis_error << std::endl;
+            }
+
+            std::cout << "Redis task done: " << task.task_id
+                << ", detections=" << detections.size()
+                << ", infer_ms=" << infer_ms
+                << std::endl;
+        }
+        catch (const std::exception& e) {
+            redis_error.clear();
+            if (!redis_queue_.markFailed(task.task_id, e.what(), nowMs(), redis_error)) {
+                std::cerr << "Redis markFailed failed: task_id=" << task.task_id
+                    << ", error=" << redis_error << std::endl;
+            }
+
+            redis_error.clear();
+            if (!redis_queue_.ackTask(task.stream_id, redis_error)) {
+                std::cerr << "Redis ackTask failed after failed task: stream_id=" << task.stream_id
+                    << ", error=" << redis_error << std::endl;
+            }
+
+            std::cerr << "Redis task failed: " << task.task_id
+                << ", error=" << e.what() << std::endl;
+        }
+    }
+
+    long long HttpController::nowMs() {
+        auto now = std::chrono::system_clock::now();
+        return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
     }
 
 }  // namespace yolo11_server
