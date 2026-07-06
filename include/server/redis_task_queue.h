@@ -1,7 +1,9 @@
 #pragma once
 
+#include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "server/app_config.h"
 
@@ -46,6 +48,54 @@ namespace yolo11_server {
     struct RedisStreamStats {
         long long stream_len = -1;
         long long pending = -1;
+    };
+
+    struct RedisMemoryStats {
+        bool found = false;
+        long long used_memory_bytes = 0;
+        double used_memory_mb = 0.0;
+        long long maxmemory_bytes = 0;
+        double maxmemory_mb = 0.0;
+        std::string used_memory_human;
+        std::string maxmemory_human;
+    };
+
+
+    struct RedisRuntimeMetrics {
+        bool found = false;
+        long long done_count = 0;
+        long long failed_count = 0;
+        long long total_count = 0;
+        long long recent_done_count = 0;
+        int recent_window_seconds = 60;
+        double qps_recent = 0.0;
+        double avg_queue_wait_ms = 0.0;
+        double avg_inference_ms = 0.0;
+        double avg_total_ms = 0.0;
+        long long last_finish_time_ms = 0;
+        std::string last_task_id;
+        std::map<std::string, long long> worker_done_count;
+        std::map<std::string, long long> worker_failed_count;
+    };
+
+    struct WorkerHeartbeatRecord {
+        bool found = false;
+        bool alive = false;
+        std::string consumer_name;
+        std::string heartbeat_key;
+        std::string pid;
+        std::string host;
+        int worker_id = 0;
+        int gpu_id = 0;
+        std::string model_type;
+        std::string status;
+        std::string current_task_id;
+        long long processed_count = 0;
+        long long failed_count = 0;
+        long long start_time_ms = 0;
+        long long last_heartbeat_ms = 0;
+        long long last_heartbeat_age_ms = -1;
+        std::string last_error;
     };
 
     class RedisTaskQueue {
@@ -103,13 +153,31 @@ namespace yolo11_server {
         bool ackTask(const std::string& stream_id, std::string& error) const;
 
         bool getStreamStats(RedisStreamStats& stats, std::string& error) const;
+        bool getRedisMemoryStats(RedisMemoryStats& stats, std::string& error) const;
+        bool getRuntimeMetrics(RedisRuntimeMetrics& metrics, std::string& error) const;
 
         // Binary value helpers used for image bytes.
         bool setBinaryValue(const std::string& key, const std::string& value, std::string& error) const;
+        bool setBinaryValueWithTtl(const std::string& key, const std::string& value, int ttl_seconds, std::string& error) const;
         bool getBinaryValue(const std::string& key, std::string& value, std::string& error) const;
+        bool deleteKey(const std::string& key, std::string& error) const;
+
+        // Worker heartbeat helpers.
+        bool writeWorkerHeartbeat(const WorkerHeartbeatRecord& heartbeat, int ttl_seconds, std::string& error) const;
+        bool getWorkerHeartbeats(
+            const std::string& consumer_name_prefix,
+            int expected_worker_num,
+            std::vector<WorkerHeartbeatRecord>& workers,
+            std::string& error
+        ) const;
 
         std::string inputImageKey(const std::string& task_id) const;
         std::string resultImageKey(const std::string& task_id) const;
+        std::string workerHeartbeatKey(const std::string& consumer_name) const;
+        std::string metricsGlobalKey() const;
+        std::string metricsWorkerDoneKey() const;
+        std::string metricsWorkerFailedKey() const;
+        std::string metricsRecentDoneKey() const;
 
     private:
         std::string statusKey(const std::string& task_id) const;

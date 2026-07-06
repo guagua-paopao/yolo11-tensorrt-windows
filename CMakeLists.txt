@@ -91,6 +91,7 @@ message(STATUS "OpenCV_LIBS = ${OpenCV_LIBS}")
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(yaml-cpp CONFIG REQUIRED)
 find_package(Crow CONFIG REQUIRED)
+find_package(spdlog CONFIG REQUIRED)
 
 # Redis client: hiredis
 # vcpkg install hiredis:x64-windows
@@ -347,7 +348,9 @@ copy_myplugins_to_target(demo_obb_image)
 add_executable(yolo11_server
     ${PROJECT_SOURCE_DIR}/src/server/main_server.cpp
     ${PROJECT_SOURCE_DIR}/src/server/app_config.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/app_logger.cpp
     ${PROJECT_SOURCE_DIR}/src/server/image_codec.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/label_map.cpp
     ${PROJECT_SOURCE_DIR}/src/server/result_serializer.cpp
     ${PROJECT_SOURCE_DIR}/src/server/redis_task_queue.cpp
     ${PROJECT_SOURCE_DIR}/src/server/inference_worker.cpp
@@ -376,6 +379,7 @@ target_link_libraries(yolo11_server PRIVATE
     nlohmann_json::nlohmann_json
     yaml-cpp::yaml-cpp
     Crow::Crow
+    spdlog::spdlog
     ${YOLO11_HIREDIS_TARGET}
 )
 
@@ -393,7 +397,9 @@ copy_myplugins_to_target(yolo11_server)
 add_executable(yolo11_worker
     ${PROJECT_SOURCE_DIR}/src/server/main_worker.cpp
     ${PROJECT_SOURCE_DIR}/src/server/app_config.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/app_logger.cpp
     ${PROJECT_SOURCE_DIR}/src/server/image_codec.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/label_map.cpp
     ${PROJECT_SOURCE_DIR}/src/server/result_serializer.cpp
     ${PROJECT_SOURCE_DIR}/src/server/redis_task_queue.cpp
     ${PROJECT_SOURCE_DIR}/src/server/inference_worker.cpp
@@ -420,6 +426,7 @@ target_link_libraries(yolo11_worker PRIVATE
 
     nlohmann_json::nlohmann_json
     yaml-cpp::yaml-cpp
+    spdlog::spdlog
     ${YOLO11_HIREDIS_TARGET}
 )
 

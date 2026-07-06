@@ -7,7 +7,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
-#include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -15,128 +14,15 @@
 
 #include <nlohmann/json.hpp>
 #include <opencv2/opencv.hpp>
+#include <spdlog/spdlog.h>
 
 #include "server/image_codec.h"
+#include "server/result_serializer.h"
 #include "postprocess.h"
 
 namespace yolo11_server {
 
     namespace {
-
-        const std::vector<std::string>& cocoClassNames() {
-            static const std::vector<std::string> names = {
-                "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
-                "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog",
-                "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
-                "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite",
-                "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle",
-                "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich",
-                "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
-                "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote",
-                "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book",
-                "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
-            };
-            return names;
-        }
-
-        std::string classNameFromId(int class_id) {
-            const auto& names = cocoClassNames();
-            if (class_id >= 0 && class_id < static_cast<int>(names.size())) {
-                return names[class_id];
-            }
-            return "class_" + std::to_string(class_id);
-        }
-
-        std::string toLowerString(std::string s) {
-            std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
-                return static_cast<char>(std::tolower(c));
-                });
-            return s;
-        }
-
-        crow::response makeJsonResponse(int code, const nlohmann::json& body) {
-            crow::response response(code, body.dump(4));
-            response.set_header("Content-Type", "application/json; charset=utf-8");
-            return response;
-        }
-
-        bool isTrueString(const std::string& value) {
-            const std::string v = toLowerString(value);
-            return v == "1" || v == "true" || v == "yes" || v == "on";
-        }
-
-        bool rectTouchesImageBoundary(const cv::Rect& rect, const cv::Mat& image) {
-            if (image.empty()) {
-                return true;
-            }
-            if (rect.x <= 0 || rect.y <= 0) {
-                return true;
-            }
-            if (rect.x + rect.width >= image.cols) {
-                return true;
-            }
-            if (rect.y + rect.height >= image.rows) {
-                return true;
-            }
-            return false;
-        }
-
-        nlohmann::json detectionsToJsonForImage(
-            const std::vector<Detection>& detections,
-            const cv::Mat& image,
-            bool debug
-        ) {
-            nlohmann::json arr = nlohmann::json::array();
-
-            for (const auto& detection : detections) {
-                cv::Mat image_for_rect = image;
-                float bbox_for_rect[4] = {
-                    detection.bbox[0],
-                    detection.bbox[1],
-                    detection.bbox[2],
-                    detection.bbox[3]
-                };
-
-                cv::Rect rect = ::get_rect(image_for_rect, bbox_for_rect);
-
-                const int x1 = rect.x;
-                const int y1 = rect.y;
-                const int w = rect.width;
-                const int h = rect.height;
-                const int x2 = rect.x + rect.width;
-                const int y2 = rect.y + rect.height;
-                const int class_id = static_cast<int>(detection.class_id);
-
-                nlohmann::json item;
-                item["class_id"] = class_id;
-                item["class_name"] = classNameFromId(class_id);
-                item["confidence"] = detection.conf;
-                item["bbox"] = {
-                    {"x", x1},
-                    {"y", y1},
-                    {"w", w},
-                    {"h", h},
-                    {"x1", x1},
-                    {"y1", y1},
-                    {"x2", x2},
-                    {"y2", y2}
-                };
-                item["clipped"] = rectTouchesImageBoundary(rect, image);
-
-                if (debug) {
-                    item["raw_model_bbox"] = {
-                        {"x1", detection.bbox[0]},
-                        {"y1", detection.bbox[1]},
-                        {"x2", detection.bbox[2]},
-                        {"y2", detection.bbox[3]}
-                    };
-                }
-
-                arr.push_back(item);
-            }
-
-            return arr;
-        }
 
         std::string readWholeFileBinary(const std::string& path) {
             std::ifstream file(path, std::ios::binary);
@@ -146,6 +32,61 @@ namespace yolo11_server {
             std::ostringstream buffer;
             buffer << file.rdbuf();
             return buffer.str();
+        }
+
+        nlohmann::json memoryStatsToJson(const RedisMemoryStats& stats) {
+            nlohmann::json body;
+            body["found"] = stats.found;
+            body["used_memory_bytes"] = stats.used_memory_bytes;
+            body["used_memory_mb"] = stats.used_memory_mb;
+            body["used_memory_human"] = stats.used_memory_human;
+            body["maxmemory_bytes"] = stats.maxmemory_bytes;
+            body["maxmemory_mb"] = stats.maxmemory_mb;
+            body["maxmemory_human"] = stats.maxmemory_human;
+            return body;
+        }
+
+        nlohmann::json workerHeartbeatToJson(const WorkerHeartbeatRecord& worker) {
+            nlohmann::json item;
+            item["consumer_name"] = worker.consumer_name;
+            item["heartbeat_key"] = worker.heartbeat_key;
+            item["found"] = worker.found;
+            item["alive"] = worker.alive;
+            item["pid"] = worker.pid;
+            item["host"] = worker.host;
+            item["worker_id"] = worker.worker_id;
+            item["gpu_id"] = worker.gpu_id;
+            item["model_type"] = worker.model_type;
+            item["status"] = worker.status;
+            item["current_task_id"] = worker.current_task_id;
+            item["processed_count"] = worker.processed_count;
+            item["failed_count"] = worker.failed_count;
+            item["start_time_ms"] = worker.start_time_ms;
+            item["last_heartbeat_ms"] = worker.last_heartbeat_ms;
+            item["last_heartbeat_age_ms"] = worker.last_heartbeat_age_ms;
+            item["last_error"] = worker.last_error;
+            return item;
+        }
+
+
+        std::string toLowerString(std::string text) {
+            std::transform(text.begin(), text.end(), text.begin(),
+                [](unsigned char ch) {
+                    return static_cast<char>(std::tolower(ch));
+                });
+            return text;
+        }
+
+        bool isTrueString(const std::string& value) {
+            const std::string lower = toLowerString(value);
+            return lower == "1" || lower == "true" || lower == "yes" || lower == "on";
+        }
+
+        crow::response makeJsonResponse(int code, const nlohmann::json& body) {
+            crow::response response(code);
+            response.set_header("Content-Type", "application/json; charset=utf-8");
+            response.body = body.dump(4);
+            return response;
         }
 
     }  // namespace
@@ -163,19 +104,25 @@ namespace yolo11_server {
                 throw std::runtime_error("failed to connect Redis: " + error);
             }
             redis_mode_ = true;
-            std::cout << "Redis queue enabled for HTTP producer: "
-                << config_.redis.host << ":" << config_.redis.port
-                << ", stream=" << config_.redis.stream_key
-                << ", group=" << config_.redis.consumer_group
-                << std::endl;
+            spdlog::info("Redis queue enabled for HTTP producer: {}:{}, stream={}, group={}",
+                config_.redis.host, config_.redis.port, config_.redis.stream_key, config_.redis.consumer_group);
         }
         else {
             redis_mode_ = false;
-            std::cout << "Redis queue disabled. Async HTTP API will return 503." << std::endl;
+            spdlog::warn("Redis queue disabled. Async HTTP API will return 503.");
+        }
+
+        std::string label_error;
+        if (!label_map_.loadFromFile(config_.model.labels_path, label_error)) {
+            spdlog::warn("Failed to load labels_path='{}': {}. class_name will fall back to class_<id>.",
+                config_.model.labels_path, label_error);
+        }
+        else {
+            spdlog::info("Loaded {} labels from {}", label_map_.size(), label_map_.sourcePath());
         }
 
         if (!sync_enabled_) {
-            std::cout << "Sync detect endpoint is disabled in this process." << std::endl;
+            spdlog::info("Sync detect endpoint is disabled in this process.");
         }
     }
 
@@ -184,6 +131,24 @@ namespace yolo11_server {
             .methods(crow::HTTPMethod::GET)
             ([this]() {
             return handleHealth();
+                });
+
+        CROW_ROUTE(app, "/api/v1/ready")
+            .methods(crow::HTTPMethod::GET)
+            ([this]() {
+            return handleReady();
+                });
+
+        CROW_ROUTE(app, "/api/v1/workers")
+            .methods(crow::HTTPMethod::GET)
+            ([this]() {
+            return handleWorkers();
+                });
+
+        CROW_ROUTE(app, "/api/v1/metrics")
+            .methods(crow::HTTPMethod::GET)
+            ([this]() {
+            return handleMetrics();
                 });
 
         CROW_ROUTE(app, "/api/v1/detect/image")
@@ -222,16 +187,19 @@ namespace yolo11_server {
         body["success"] = true;
         body["status"] = "ok";
         body["service"] = "yolo11_server";
-        body["phase"] = "phase7_server_worker_split_ready";
+        body["phase"] = "phase8_5_logging_labels_metrics";
         body["role"] = "http_producer";
         body["model_type"] = config_.model.type;
         body["engine_path"] = config_.model.engine_path;
+        body["labels_path"] = config_.model.labels_path;
+        body["labels_loaded"] = !label_map_.empty();
+        body["label_count"] = label_map_.size();
         body["gpu_id"] = config_.model.gpu_id;
         body["sync_detect_enabled"] = sync_enabled_;
         body["embedded_worker_enabled"] = config_.worker.enabled;
         body["queue_backend"] = redis_mode_ ? "redis_stream" : "disabled";
-        body["worker_num"] = config_.worker.enabled ? config_.worker.worker_num : 0;
         body["image_storage"] = redis_mode_ ? "redis_binary_keys" : "local_file_only";
+        body["server_health"] = "ok";
 
         if (redis_mode_) {
             std::string redis_error;
@@ -257,9 +225,270 @@ namespace yolo11_server {
             else if (!stats_error.empty()) {
                 body["redis_stats_error"] = stats_error;
             }
+
+            RedisMemoryStats memory_stats;
+            std::string memory_error;
+            if (redis_queue_.getRedisMemoryStats(memory_stats, memory_error)) {
+                body["redis_memory"] = memoryStatsToJson(memory_stats);
+                body["redis_max_used_memory_mb_config"] = config_.redis.max_redis_used_memory_mb;
+            }
+            else if (!memory_error.empty()) {
+                body["redis_memory_error"] = memory_error;
+            }
         }
         else {
             body["redis_enabled"] = false;
+        }
+
+        return makeJsonResponse(200, body);
+    }
+
+    crow::response HttpController::handleReady() const {
+        nlohmann::json body;
+        body["success"] = true;
+        body["service"] = "yolo11_server";
+        body["phase"] = "phase8_5_logging_labels_metrics";
+        body["server_status"] = "ok";
+        body["redis_status"] = redis_mode_ ? "unknown" : "disabled";
+        body["worker_status"] = "unknown";
+        body["ready"] = false;
+        body["expected_workers"] = config_.worker.worker_num;
+        body["min_alive_workers"] = config_.worker.min_alive_workers;
+
+        bool redis_ok = false;
+        bool memory_ok = true;
+        bool workers_ok = false;
+
+        if (!redis_mode_) {
+            body["redis_status"] = "disabled";
+            body["reason"] = "redis disabled";
+            return makeJsonResponse(503, body);
+        }
+
+        std::string redis_error;
+        redis_ok = redis_queue_.ping(redis_error);
+        body["redis_status"] = redis_ok ? "ok" : "failed";
+        body["redis_ping"] = redis_ok ? "ok" : "failed";
+        if (!redis_error.empty()) {
+            body["redis_error"] = redis_error;
+        }
+
+        RedisStreamStats stats;
+        std::string stats_error;
+        if (redis_queue_.getStreamStats(stats, stats_error)) {
+            body["redis_pending"] = stats.pending;
+            body["redis_stream_len"] = stats.stream_len;
+            body["redis_stream_max_len"] = config_.redis.stream_max_len;
+        }
+        else if (!stats_error.empty()) {
+            body["redis_stats_error"] = stats_error;
+        }
+
+        RedisMemoryStats memory_stats;
+        std::string memory_error;
+        if (redis_queue_.getRedisMemoryStats(memory_stats, memory_error)) {
+            body["redis_memory"] = memoryStatsToJson(memory_stats);
+            body["redis_max_used_memory_mb_config"] = config_.redis.max_redis_used_memory_mb;
+            if (config_.redis.max_redis_used_memory_mb > 0 &&
+                memory_stats.used_memory_mb > static_cast<double>(config_.redis.max_redis_used_memory_mb)) {
+                memory_ok = false;
+                body["redis_memory_status"] = "over_limit";
+            }
+            else {
+                body["redis_memory_status"] = "ok";
+            }
+        }
+        else {
+            body["redis_memory_status"] = "unknown";
+            if (!memory_error.empty()) {
+                body["redis_memory_error"] = memory_error;
+            }
+        }
+
+        std::vector<WorkerHeartbeatRecord> workers;
+        std::string workers_error;
+        int alive_workers = 0;
+        if (redis_queue_.getWorkerHeartbeats(
+            config_.worker.consumer_name_prefix,
+            config_.worker.worker_num,
+            workers,
+            workers_error)) {
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& worker : workers) {
+                if (worker.alive) {
+                    ++alive_workers;
+                }
+                arr.push_back(workerHeartbeatToJson(worker));
+            }
+            body["workers"] = arr;
+            body["alive_workers"] = alive_workers;
+            workers_ok = alive_workers >= config_.worker.min_alive_workers;
+            body["worker_status"] = workers_ok ? "ok" : "no_enough_alive_workers";
+        }
+        else {
+            body["worker_status"] = "query_failed";
+            body["workers_error"] = workers_error;
+        }
+
+        const bool ready = redis_ok && memory_ok && workers_ok;
+        body["ready"] = ready;
+        if (!ready) {
+            if (!redis_ok) {
+                body["reason"] = "redis not healthy";
+            }
+            else if (!memory_ok) {
+                body["reason"] = "redis memory over limit";
+            }
+            else if (!workers_ok) {
+                body["reason"] = "not enough alive workers";
+            }
+        }
+
+        return makeJsonResponse(ready ? 200 : 503, body);
+    }
+
+    crow::response HttpController::handleWorkers() const {
+        if (!redis_mode_) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_DISABLED";
+            body["error"] = "worker heartbeat query requires redis.enabled=true";
+            return makeJsonResponse(503, body);
+        }
+
+        std::vector<WorkerHeartbeatRecord> workers;
+        std::string error;
+        if (!redis_queue_.getWorkerHeartbeats(
+            config_.worker.consumer_name_prefix,
+            config_.worker.worker_num,
+            workers,
+            error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "WORKER_HEARTBEAT_QUERY_FAILED";
+            body["error"] = error;
+            return makeJsonResponse(500, body);
+        }
+
+        int alive_workers = 0;
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& worker : workers) {
+            if (worker.alive) {
+                ++alive_workers;
+            }
+            arr.push_back(workerHeartbeatToJson(worker));
+        }
+
+        nlohmann::json body;
+        body["success"] = true;
+        body["expected_workers"] = config_.worker.worker_num;
+        body["min_alive_workers"] = config_.worker.min_alive_workers;
+        body["alive_workers"] = alive_workers;
+        body["heartbeat_enabled"] = config_.worker.heartbeat_enabled;
+        body["heartbeat_interval_ms"] = config_.worker.heartbeat_interval_ms;
+        body["heartbeat_ttl_seconds"] = config_.worker.heartbeat_ttl_seconds;
+        body["workers"] = arr;
+        return makeJsonResponse(200, body);
+    }
+
+    crow::response HttpController::handleMetrics() const {
+        if (!redis_mode_) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_DISABLED";
+            body["error"] = "metrics require redis.enabled=true";
+            return makeJsonResponse(503, body);
+        }
+
+        RedisRuntimeMetrics metrics;
+        std::string metrics_error;
+        if (!redis_queue_.getRuntimeMetrics(metrics, metrics_error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "METRICS_QUERY_FAILED";
+            body["error"] = metrics_error;
+            return makeJsonResponse(500, body);
+        }
+
+        nlohmann::json worker_done = nlohmann::json::object();
+        for (const auto& kv : metrics.worker_done_count) {
+            worker_done[kv.first] = kv.second;
+        }
+
+        nlohmann::json worker_failed = nlohmann::json::object();
+        for (const auto& kv : metrics.worker_failed_count) {
+            worker_failed[kv.first] = kv.second;
+        }
+
+        RedisStreamStats stream_stats;
+        std::string stream_error;
+        const bool stream_ok = redis_queue_.getStreamStats(stream_stats, stream_error);
+
+        RedisMemoryStats memory_stats;
+        std::string memory_error;
+        const bool memory_ok = redis_queue_.getRedisMemoryStats(memory_stats, memory_error);
+
+        std::vector<WorkerHeartbeatRecord> workers;
+        std::string workers_error;
+        int alive_workers = 0;
+        nlohmann::json worker_arr = nlohmann::json::array();
+        if (redis_queue_.getWorkerHeartbeats(
+            config_.worker.consumer_name_prefix,
+            config_.worker.worker_num,
+            workers,
+            workers_error)) {
+            for (const auto& worker : workers) {
+                if (worker.alive) {
+                    ++alive_workers;
+                }
+                worker_arr.push_back(workerHeartbeatToJson(worker));
+            }
+        }
+
+        nlohmann::json body;
+        body["success"] = true;
+        body["service"] = "yolo11_server";
+        body["phase"] = "phase8_5_logging_labels_metrics";
+        body["metrics_enabled"] = config_.redis.metrics_enabled;
+        body["metrics_found"] = metrics.found;
+        body["recent_window_seconds"] = metrics.recent_window_seconds;
+        body["recent_done_count"] = metrics.recent_done_count;
+        body["qps_recent"] = metrics.qps_recent;
+        body["total_tasks_done"] = metrics.done_count;
+        body["total_tasks_failed"] = metrics.failed_count;
+        body["total_tasks"] = metrics.total_count;
+        body["last_task_id"] = metrics.last_task_id;
+        body["last_finish_time_ms"] = metrics.last_finish_time_ms;
+        body["worker_distribution"] = worker_done;
+        body["worker_failed_distribution"] = worker_failed;
+        body["alive_workers"] = alive_workers;
+        body["expected_workers"] = config_.worker.worker_num;
+        body["workers"] = worker_arr;
+        body["latency"] = {
+            {"avg_queue_wait_ms", metrics.avg_queue_wait_ms},
+            {"avg_inference_ms", metrics.avg_inference_ms},
+            {"avg_total_ms", metrics.avg_total_ms}
+        };
+
+        if (stream_ok) {
+            body["redis_pending"] = stream_stats.pending;
+            body["redis_stream_len"] = stream_stats.stream_len;
+            body["redis_stream_max_len"] = config_.redis.stream_max_len;
+        }
+        else if (!stream_error.empty()) {
+            body["redis_stream_error"] = stream_error;
+        }
+
+        if (memory_ok) {
+            body["redis_memory"] = memoryStatsToJson(memory_stats);
+            body["redis_max_used_memory_mb_config"] = config_.redis.max_redis_used_memory_mb;
+        }
+        else if (!memory_error.empty()) {
+            body["redis_memory_error"] = memory_error;
+        }
+
+        if (!workers_error.empty()) {
+            body["workers_error"] = workers_error;
         }
 
         return makeJsonResponse(200, body);
@@ -275,6 +504,17 @@ namespace yolo11_server {
         }
 
         const auto request_id = ++request_counter_;
+
+        std::string memory_error;
+        nlohmann::json memory_json;
+        if (redisMemoryOverLimit(&memory_json, memory_error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_MEMORY_OVER_LIMIT";
+            body["error"] = memory_error;
+            body["redis_memory"] = memory_json;
+            return makeJsonResponse(503, body);
+        }
 
         std::string error_message;
         if (!validateBodySize(request, error_message)) {
@@ -293,6 +533,14 @@ namespace yolo11_server {
             body["error_code"] = "EMPTY_IMAGE_BODY";
             body["error"] = error_message.empty() ? "empty image body" : error_message;
             return makeJsonResponse(400, body);
+        }
+
+        if (!validateRedisImageSize(image_bytes.size(), "input image", error_message)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "IMAGE_TOO_LARGE";
+            body["error"] = error_message;
+            return makeJsonResponse(413, body);
         }
 
         cv::Mat image = ImageCodec::decodeImageBytes(image_bytes);
@@ -345,7 +593,7 @@ namespace yolo11_server {
             body["debug_note"] = "raw_model_bbox is returned only when debug=true or debug=1.";
         }
 
-        body["detections"] = detectionsToJsonForImage(detections, image, debug);
+        body["detections"] = ResultSerializer::detectionsToJson(detections, image, label_map_, debug);
 
         if (config_.output.save_result_image && !result_image.empty()) {
             try {
@@ -387,6 +635,59 @@ namespace yolo11_server {
             return makeJsonResponse(503, body);
         }
 
+        if (config_.worker.heartbeat_enabled && config_.worker.min_alive_workers > 0) {
+            std::vector<WorkerHeartbeatRecord> workers;
+            std::string workers_error;
+            if (!redis_queue_.getWorkerHeartbeats(
+                config_.worker.consumer_name_prefix,
+                config_.worker.worker_num,
+                workers,
+                workers_error)) {
+                nlohmann::json body;
+                body["success"] = false;
+                body["error_code"] = "WORKER_HEARTBEAT_QUERY_FAILED";
+                body["error"] = "failed to query worker heartbeat before submitting async task";
+                body["workers_error"] = workers_error;
+                body["ready"] = false;
+                return makeJsonResponse(503, body);
+            }
+
+            int alive_workers = 0;
+            nlohmann::json worker_array = nlohmann::json::array();
+            for (const auto& worker : workers) {
+                if (worker.alive) {
+                    ++alive_workers;
+                }
+                worker_array.push_back(workerHeartbeatToJson(worker));
+            }
+
+            if (alive_workers < config_.worker.min_alive_workers) {
+                nlohmann::json body;
+                body["success"] = false;
+                body["error_code"] = "NOT_ENOUGH_ALIVE_WORKERS";
+                body["error"] = "async task rejected because not enough alive workers";
+                body["ready"] = false;
+                body["reason"] = "not enough alive workers";
+                body["alive_workers"] = alive_workers;
+                body["expected_workers"] = config_.worker.worker_num;
+                body["min_alive_workers"] = config_.worker.min_alive_workers;
+                body["worker_status"] = "no_enough_alive_workers";
+                body["workers"] = worker_array;
+                return makeJsonResponse(503, body);
+            }
+        }
+
+        std::string memory_error;
+        nlohmann::json memory_json;
+        if (redisMemoryOverLimit(&memory_json, memory_error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_MEMORY_OVER_LIMIT";
+            body["error"] = memory_error;
+            body["redis_memory"] = memory_json;
+            return makeJsonResponse(503, body);
+        }
+
         std::string error_message;
         if (!validateBodySize(request, error_message)) {
             nlohmann::json body;
@@ -404,6 +705,14 @@ namespace yolo11_server {
             body["error_code"] = "EMPTY_IMAGE_BODY";
             body["error"] = error_message.empty() ? "empty image body" : error_message;
             return makeJsonResponse(400, body);
+        }
+
+        if (!validateRedisImageSize(image_bytes.size(), "input image", error_message)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "IMAGE_TOO_LARGE";
+            body["error"] = error_message;
+            return makeJsonResponse(413, body);
         }
 
         cv::Mat image = ImageCodec::decodeImageBytes(image_bytes);
@@ -430,8 +739,16 @@ namespace yolo11_server {
             return makeJsonResponse(500, body);
         }
 
+        if (!validateRedisImageSize(normalized_jpeg.size(), "normalized input image", error_message)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "IMAGE_TOO_LARGE_AFTER_ENCODE";
+            body["error"] = error_message;
+            return makeJsonResponse(413, body);
+        }
+
         std::string redis_error;
-        if (!redis_queue_.setBinaryValue(input_key, normalized_jpeg, redis_error)) {
+        if (!redis_queue_.setBinaryValueWithTtl(input_key, normalized_jpeg, config_.redis.input_image_ttl_seconds, redis_error)) {
             nlohmann::json body;
             body["success"] = false;
             body["error_code"] = "REDIS_SET_INPUT_FAILED";
@@ -458,6 +775,8 @@ namespace yolo11_server {
 
         redis_error.clear();
         if (!redis_queue_.submitTask(task, redis_error)) {
+            std::string del_error;
+            redis_queue_.deleteKey(input_key, del_error);
             nlohmann::json body;
             body["success"] = false;
             body["error_code"] = "REDIS_SUBMIT_FAILED";
@@ -476,6 +795,9 @@ namespace yolo11_server {
         body["result_image_key"] = result_key;
         body["result_url"] = "/api/v1/result/" + task_id;
         body["result_image_url"] = "/api/v1/result/" + task_id + "/image";
+
+        spdlog::info("Async task submitted: task_id={}, input_bytes={}, redis_input_key={}",
+            task_id, normalized_jpeg.size(), input_key);
 
         return makeJsonResponse(202, body);
     }
@@ -659,6 +981,45 @@ namespace yolo11_server {
 
         error_message = "request body is empty. Use multipart field name 'file' or raw jpg/png bytes.";
         return {};
+    }
+
+    bool HttpController::validateRedisImageSize(size_t bytes, const std::string& field_name, std::string& error_message) const {
+        if (config_.redis.max_image_bytes <= 0) {
+            return true;
+        }
+        if (static_cast<long long>(bytes) > config_.redis.max_image_bytes) {
+            error_message = field_name + " too large. bytes=" + std::to_string(bytes) +
+                ", max_image_bytes=" + std::to_string(config_.redis.max_image_bytes);
+            return false;
+        }
+        return true;
+    }
+
+    bool HttpController::redisMemoryOverLimit(nlohmann::json* memory_json, std::string& error_message) const {
+        if (!redis_mode_ || config_.redis.max_redis_used_memory_mb <= 0) {
+            return false;
+        }
+
+        RedisMemoryStats memory_stats;
+        std::string redis_error;
+        if (!redis_queue_.getRedisMemoryStats(memory_stats, redis_error)) {
+            return false;
+        }
+
+        if (memory_json != nullptr) {
+            *memory_json = memoryStatsToJson(memory_stats);
+            (*memory_json)["max_redis_used_memory_mb_config"] = config_.redis.max_redis_used_memory_mb;
+        }
+
+        if (memory_stats.used_memory_mb > static_cast<double>(config_.redis.max_redis_used_memory_mb)) {
+            std::ostringstream oss;
+            oss << "Redis used memory is over limit. used_memory_mb=" << memory_stats.used_memory_mb
+                << ", max_redis_used_memory_mb=" << config_.redis.max_redis_used_memory_mb;
+            error_message = oss.str();
+            return true;
+        }
+
+        return false;
     }
 
     bool HttpController::isTrueParam(const char* value) const {

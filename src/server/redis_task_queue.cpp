@@ -22,6 +22,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <hiredis/hiredis.h>
 
@@ -103,6 +104,31 @@ namespace yolo11_server {
             catch (...) {
                 return default_value;
             }
+        }
+
+        long long nowMs() {
+            auto now = std::chrono::system_clock::now();
+            return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        }
+
+        std::map<std::string, std::string> parseInfoText(const std::string& text) {
+            std::map<std::string, std::string> values;
+            std::istringstream iss(text);
+            std::string line;
+            while (std::getline(iss, line)) {
+                if (!line.empty() && line.back() == '\r') {
+                    line.pop_back();
+                }
+                if (line.empty() || line[0] == '#') {
+                    continue;
+                }
+                const auto pos = line.find(':');
+                if (pos == std::string::npos) {
+                    continue;
+                }
+                values[line.substr(0, pos)] = line.substr(pos + 1);
+            }
+            return values;
         }
 
         std::map<std::string, std::string> parseHashReply(const redisReply* reply) {
@@ -246,6 +272,14 @@ namespace yolo11_server {
                 redisCommand(context, "EXPIRE %s %d", key.c_str(), ttl_seconds)
                 ));
             return !replyIsError(reply.get(), error, context);
+        }
+
+        int taskTtlSeconds(const RedisSection& config) {
+            return config.task_ttl_seconds > 0 ? config.task_ttl_seconds : config.ttl_seconds;
+        }
+
+        bool hashHasAnyField(const std::map<std::string, std::string>& values) {
+            return !values.empty();
         }
 
         bool fillTaskFromStreamEntry(redisReply* entry_reply, RedisTask& task, std::string& error) {
@@ -397,9 +431,16 @@ namespace yolo11_server {
     }
 
     bool RedisTaskQueue::setBinaryValue(const std::string& key, const std::string& value, std::string& error) const {
+        return setBinaryValueWithTtl(key, value, config_.ttl_seconds, error);
+    }
+
+    bool RedisTaskQueue::setBinaryValueWithTtl(const std::string& key, const std::string& value, int ttl_seconds, std::string& error) const {
         if (key.empty()) {
             error = "empty redis binary key";
             return false;
+        }
+        if (ttl_seconds <= 0) {
+            ttl_seconds = config_.ttl_seconds;
         }
 
         std::lock_guard<std::mutex> lock(context_mutex_);
@@ -410,7 +451,7 @@ namespace yolo11_server {
             10000,
             "SETEX %s %d %b",
             key.c_str(),
-            config_.ttl_seconds,
+            ttl_seconds,
             value.data(),
             value.size()
         );
@@ -462,7 +503,7 @@ namespace yolo11_server {
             10000,
             "SETEX %s %d %s",
             status_key.c_str(),
-            config_.ttl_seconds,
+            taskTtlSeconds(config_),
             "queued"
         );
         if (replyIsError(status_reply.get(), error, context_)) {
@@ -496,7 +537,7 @@ namespace yolo11_server {
             return false;
         }
 
-        if (!expireKey(context_, meta_key, config_.ttl_seconds, error)) {
+        if (!expireKey(context_, meta_key, taskTtlSeconds(config_), error)) {
             return false;
         }
 
@@ -555,7 +596,7 @@ namespace yolo11_server {
             10000,
             "SETEX %s %d %s",
             status_key.c_str(),
-            config_.ttl_seconds,
+            taskTtlSeconds(config_),
             "running"
         );
         if (replyIsError(status_reply.get(), error, context_)) {
@@ -577,7 +618,7 @@ namespace yolo11_server {
             return false;
         }
 
-        return expireKey(context_, meta_key, config_.ttl_seconds, error);
+        return expireKey(context_, meta_key, taskTtlSeconds(config_), error);
     }
 
     bool RedisTaskQueue::markDone(
@@ -608,7 +649,7 @@ namespace yolo11_server {
             10000,
             "SETEX %s %d %s",
             result_key.c_str(),
-            config_.ttl_seconds,
+            taskTtlSeconds(config_),
             result_json_text.c_str()
         );
         if (replyIsError(result_reply.get(), error, context_)) {
@@ -637,7 +678,7 @@ namespace yolo11_server {
             return false;
         }
 
-        if (!expireKey(context_, meta_key, config_.ttl_seconds, error)) {
+        if (!expireKey(context_, meta_key, taskTtlSeconds(config_), error)) {
             return false;
         }
 
@@ -648,11 +689,37 @@ namespace yolo11_server {
             10000,
             "SETEX %s %d %s",
             status_key.c_str(),
-            config_.ttl_seconds,
+            taskTtlSeconds(config_),
             "done"
         );
         if (replyIsError(status_reply.get(), error, context_)) {
             return false;
+        }
+
+        if (config_.metrics_enabled) {
+            std::string metrics_error;
+            const std::string global_key = metricsGlobalKey();
+            const std::string worker_done_key = metricsWorkerDoneKey();
+            const std::string recent_key = metricsRecentDoneKey();
+            const std::string recent_member = std::to_string(finish_time_ms) + ":" + task_id;
+
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HINCRBY %s done_count 1", global_key.c_str());
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HINCRBYFLOAT %s total_queue_wait_ms %.6f", global_key.c_str(), static_cast<double>(queue_wait_ms));
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HINCRBYFLOAT %s total_inference_ms %.6f", global_key.c_str(), infer_ms);
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HINCRBYFLOAT %s total_total_ms %.6f", global_key.c_str(), static_cast<double>(total_ms));
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HSET %s last_finish_time_ms %lld last_task_id %s",
+                global_key.c_str(), finish_time_ms, task_id.c_str());
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HINCRBY %s %s 1", worker_done_key.c_str(), consumer_name.c_str());
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "ZADD %s %lld %s", recent_key.c_str(), finish_time_ms, recent_member.c_str());
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "EXPIRE %s %d", recent_key.c_str(), config_.metrics_ttl_seconds);
         }
 
         return true;
@@ -691,7 +758,7 @@ namespace yolo11_server {
             return false;
         }
 
-        if (!expireKey(context_, meta_key, config_.ttl_seconds, error)) {
+        if (!expireKey(context_, meta_key, taskTtlSeconds(config_), error)) {
             return false;
         }
 
@@ -702,11 +769,24 @@ namespace yolo11_server {
             10000,
             "SETEX %s %d %s",
             status_key.c_str(),
-            config_.ttl_seconds,
+            taskTtlSeconds(config_),
             "failed"
         );
         if (replyIsError(status_reply.get(), error, context_)) {
             return false;
+        }
+
+        if (config_.metrics_enabled) {
+            std::string metrics_error;
+            const std::string global_key = metricsGlobalKey();
+            const std::string worker_failed_key = metricsWorkerFailedKey();
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HINCRBY %s failed_count 1", global_key.c_str());
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HSET %s last_finish_time_ms %lld last_task_id %s",
+                global_key.c_str(), finish_time_ms, task_id.c_str());
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HINCRBY %s %s 1", worker_failed_key.c_str(), consumer_name.c_str());
         }
 
         return true;
@@ -967,12 +1047,313 @@ namespace yolo11_server {
         return true;
     }
 
+
+    bool RedisTaskQueue::getRuntimeMetrics(RedisRuntimeMetrics& metrics, std::string& error) const {
+        metrics = RedisRuntimeMetrics{};
+        metrics.recent_window_seconds = config_.metrics_recent_window_seconds;
+
+        std::lock_guard<std::mutex> lock(context_mutex_);
+
+        const std::string global_key = metricsGlobalKey();
+        const std::string worker_done_key = metricsWorkerDoneKey();
+        const std::string worker_failed_key = metricsWorkerFailedKey();
+        const std::string recent_key = metricsRecentDoneKey();
+
+        RedisReplyPtr global_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "HGETALL %s",
+            global_key.c_str()
+        );
+        if (replyIsError(global_reply.get(), error, context_)) {
+            error = "HGETALL metrics global failed: " + error;
+            return false;
+        }
+
+        const auto global_values = parseHashReply(global_reply.get());
+        metrics.found = hashHasAnyField(global_values);
+        auto getGlobal = [&global_values](const std::string& key) -> std::string {
+            auto it = global_values.find(key);
+            return it == global_values.end() ? std::string{} : it->second;
+        };
+
+        metrics.done_count = parseLongLong(getGlobal("done_count"));
+        metrics.failed_count = parseLongLong(getGlobal("failed_count"));
+        metrics.total_count = metrics.done_count + metrics.failed_count;
+        metrics.last_finish_time_ms = parseLongLong(getGlobal("last_finish_time_ms"));
+        metrics.last_task_id = getGlobal("last_task_id");
+
+        const double total_queue = parseDouble(getGlobal("total_queue_wait_ms"));
+        const double total_infer = parseDouble(getGlobal("total_inference_ms"));
+        const double total_total = parseDouble(getGlobal("total_total_ms"));
+        if (metrics.done_count > 0) {
+            metrics.avg_queue_wait_ms = total_queue / static_cast<double>(metrics.done_count);
+            metrics.avg_inference_ms = total_infer / static_cast<double>(metrics.done_count);
+            metrics.avg_total_ms = total_total / static_cast<double>(metrics.done_count);
+        }
+
+        const long long now_ms = nowMs();
+        const long long min_score = now_ms - static_cast<long long>(metrics.recent_window_seconds) * 1000LL;
+        RedisReplyPtr trim_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "ZREMRANGEBYSCORE %s 0 %lld",
+            recent_key.c_str(),
+            min_score
+        );
+        if (replyIsError(trim_reply.get(), error, context_)) {
+            error = "ZREMRANGEBYSCORE metrics failed: " + error;
+            return false;
+        }
+
+        RedisReplyPtr recent_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "ZCARD %s",
+            recent_key.c_str()
+        );
+        if (replyIsError(recent_reply.get(), error, context_)) {
+            error = "ZCARD metrics failed: " + error;
+            return false;
+        }
+        if (recent_reply->type == REDIS_REPLY_INTEGER) {
+            metrics.recent_done_count = recent_reply->integer;
+        }
+        if (metrics.recent_window_seconds > 0) {
+            metrics.qps_recent = static_cast<double>(metrics.recent_done_count) /
+                static_cast<double>(metrics.recent_window_seconds);
+        }
+
+        RedisReplyPtr worker_done_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "HGETALL %s",
+            worker_done_key.c_str()
+        );
+        if (replyIsError(worker_done_reply.get(), error, context_)) {
+            error = "HGETALL worker done metrics failed: " + error;
+            return false;
+        }
+        const auto worker_done_values = parseHashReply(worker_done_reply.get());
+        for (const auto& kv : worker_done_values) {
+            metrics.worker_done_count[kv.first] = parseLongLong(kv.second);
+        }
+
+        RedisReplyPtr worker_failed_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "HGETALL %s",
+            worker_failed_key.c_str()
+        );
+        if (replyIsError(worker_failed_reply.get(), error, context_)) {
+            error = "HGETALL worker failed metrics failed: " + error;
+            return false;
+        }
+        const auto worker_failed_values = parseHashReply(worker_failed_reply.get());
+        for (const auto& kv : worker_failed_values) {
+            metrics.worker_failed_count[kv.first] = parseLongLong(kv.second);
+        }
+
+        return true;
+    }
+
+    bool RedisTaskQueue::deleteKey(const std::string& key, std::string& error) const {
+        if (key.empty()) {
+            return true;
+        }
+
+        std::lock_guard<std::mutex> lock(context_mutex_);
+        RedisReplyPtr reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "DEL %s",
+            key.c_str()
+        );
+        return !replyIsError(reply.get(), error, context_);
+    }
+
+    bool RedisTaskQueue::getRedisMemoryStats(RedisMemoryStats& stats, std::string& error) const {
+        stats = RedisMemoryStats{};
+
+        std::lock_guard<std::mutex> lock(context_mutex_);
+        RedisReplyPtr reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "INFO memory"
+        );
+        if (replyIsError(reply.get(), error, context_)) {
+            error = "INFO memory failed: " + error;
+            return false;
+        }
+        if (reply->type != REDIS_REPLY_STRING) {
+            error = "INFO memory returned non-string reply";
+            return false;
+        }
+
+        const auto values = parseInfoText(replyString(reply.get()));
+        auto getValue = [&values](const std::string& key) -> std::string {
+            auto it = values.find(key);
+            return it == values.end() ? std::string{} : it->second;
+        };
+
+        stats.found = true;
+        stats.used_memory_bytes = parseLongLong(getValue("used_memory"));
+        stats.used_memory_mb = static_cast<double>(stats.used_memory_bytes) / 1024.0 / 1024.0;
+        stats.used_memory_human = getValue("used_memory_human");
+        stats.maxmemory_bytes = parseLongLong(getValue("maxmemory"));
+        stats.maxmemory_mb = static_cast<double>(stats.maxmemory_bytes) / 1024.0 / 1024.0;
+        stats.maxmemory_human = getValue("maxmemory_human");
+        return true;
+    }
+
+    bool RedisTaskQueue::writeWorkerHeartbeat(const WorkerHeartbeatRecord& heartbeat, int ttl_seconds, std::string& error) const {
+        if (heartbeat.consumer_name.empty()) {
+            error = "empty heartbeat consumer_name";
+            return false;
+        }
+        if (ttl_seconds <= 0) {
+            ttl_seconds = 15;
+        }
+
+        const std::string key = workerHeartbeatKey(heartbeat.consumer_name);
+
+        std::lock_guard<std::mutex> lock(context_mutex_);
+        RedisReplyPtr hset_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "HSET %s consumer_name %s pid %s host %s worker_id %d gpu_id %d model_type %s status %s current_task_id %s processed_count %lld failed_count %lld start_time_ms %lld last_heartbeat_ms %lld last_error %s",
+            key.c_str(),
+            heartbeat.consumer_name.c_str(),
+            heartbeat.pid.c_str(),
+            heartbeat.host.c_str(),
+            heartbeat.worker_id,
+            heartbeat.gpu_id,
+            heartbeat.model_type.c_str(),
+            heartbeat.status.c_str(),
+            heartbeat.current_task_id.c_str(),
+            heartbeat.processed_count,
+            heartbeat.failed_count,
+            heartbeat.start_time_ms,
+            heartbeat.last_heartbeat_ms,
+            heartbeat.last_error.c_str()
+        );
+        if (replyIsError(hset_reply.get(), error, context_)) {
+            return false;
+        }
+
+        return expireKey(context_, key, ttl_seconds, error);
+    }
+
+    bool RedisTaskQueue::getWorkerHeartbeats(
+        const std::string& consumer_name_prefix,
+        int expected_worker_num,
+        std::vector<WorkerHeartbeatRecord>& workers,
+        std::string& error
+    ) const {
+        workers.clear();
+        if (expected_worker_num <= 0) {
+            return true;
+        }
+
+        std::lock_guard<std::mutex> lock(context_mutex_);
+        const long long now_ms = nowMs();
+
+        for (int i = 1; i <= expected_worker_num; ++i) {
+            WorkerHeartbeatRecord record;
+            record.consumer_name = consumer_name_prefix + std::to_string(i);
+            record.heartbeat_key = workerHeartbeatKey(record.consumer_name);
+
+            RedisReplyPtr reply = commandWithReconnectLocked(
+                config_,
+                context_,
+                error,
+                10000,
+                "HGETALL %s",
+                record.heartbeat_key.c_str()
+            );
+            if (replyIsError(reply.get(), error, context_)) {
+                return false;
+            }
+
+            const auto values = parseHashReply(reply.get());
+            record.found = hashHasAnyField(values);
+            record.alive = record.found;
+
+            if (record.found) {
+                auto getValue = [&values](const std::string& key) -> std::string {
+                    auto it = values.find(key);
+                    return it == values.end() ? std::string{} : it->second;
+                };
+                const std::string consumer = getValue("consumer_name");
+                if (!consumer.empty()) {
+                    record.consumer_name = consumer;
+                }
+                record.pid = getValue("pid");
+                record.host = getValue("host");
+                record.worker_id = static_cast<int>(parseLongLong(getValue("worker_id")));
+                record.gpu_id = static_cast<int>(parseLongLong(getValue("gpu_id")));
+                record.model_type = getValue("model_type");
+                record.status = getValue("status");
+                record.current_task_id = getValue("current_task_id");
+                record.processed_count = parseLongLong(getValue("processed_count"));
+                record.failed_count = parseLongLong(getValue("failed_count"));
+                record.start_time_ms = parseLongLong(getValue("start_time_ms"));
+                record.last_heartbeat_ms = parseLongLong(getValue("last_heartbeat_ms"));
+                record.last_error = getValue("last_error");
+                if (record.last_heartbeat_ms > 0) {
+                    record.last_heartbeat_age_ms = std::max(0LL, now_ms - record.last_heartbeat_ms);
+                }
+            }
+
+            workers.push_back(record);
+        }
+
+        return true;
+    }
+
     std::string RedisTaskQueue::inputImageKey(const std::string& task_id) const {
         return "yolo:image:" + task_id + ":input";
     }
 
     std::string RedisTaskQueue::resultImageKey(const std::string& task_id) const {
         return "yolo:image:" + task_id + ":result";
+    }
+
+    std::string RedisTaskQueue::workerHeartbeatKey(const std::string& consumer_name) const {
+        return "yolo:worker:" + consumer_name + ":heartbeat";
+    }
+
+
+    std::string RedisTaskQueue::metricsGlobalKey() const {
+        return "yolo:metrics:global";
+    }
+
+    std::string RedisTaskQueue::metricsWorkerDoneKey() const {
+        return "yolo:metrics:worker:done";
+    }
+
+    std::string RedisTaskQueue::metricsWorkerFailedKey() const {
+        return "yolo:metrics:worker:failed";
+    }
+
+    std::string RedisTaskQueue::metricsRecentDoneKey() const {
+        return "yolo:metrics:recent:done";
     }
 
     std::string RedisTaskQueue::statusKey(const std::string& task_id) const {

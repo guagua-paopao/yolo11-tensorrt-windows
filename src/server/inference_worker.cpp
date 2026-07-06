@@ -4,34 +4,32 @@
 #include <chrono>
 #include <cctype>
 #include <filesystem>
-#include <iostream>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 #include <opencv2/opencv.hpp>
 
 #include "postprocess.h"
 #include "server/image_codec.h"
+#include "server/result_serializer.h"
 
 namespace yolo11_server {
 
     namespace {
-
-        std::mutex g_log_mutex;
-
-        void safeLog(const std::string& msg) {
-            std::lock_guard<std::mutex> lock(g_log_mutex);
-            std::cout << msg << std::endl;
-        }
-
-        void safeError(const std::string& msg) {
-            std::lock_guard<std::mutex> lock(g_log_mutex);
-            std::cerr << msg << std::endl;
-        }
 
         RedisSection makeWorkerRedisConfig(const RedisSection& base, const std::string& consumer_name) {
             RedisSection config = base;
@@ -39,91 +37,27 @@ namespace yolo11_server {
             return config;
         }
 
-        const std::vector<std::string>& cocoClassNames() {
-            static const std::vector<std::string> names = {
-                "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
-                "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog",
-                "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
-                "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite",
-                "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle",
-                "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich",
-                "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
-                "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote",
-                "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book",
-                "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
-            };
-            return names;
+        std::string processIdString() {
+#ifdef _WIN32
+            return std::to_string(static_cast<unsigned long long>(::GetCurrentProcessId()));
+#else
+            return std::to_string(static_cast<long long>(::getpid()));
+#endif
         }
 
-        std::string classNameFromId(int class_id) {
-            const auto& names = cocoClassNames();
-            if (class_id >= 0 && class_id < static_cast<int>(names.size())) {
-                return names[class_id];
+        std::string hostNameString() {
+            char buffer[256] = { 0 };
+#ifdef _WIN32
+            DWORD size = static_cast<DWORD>(sizeof(buffer));
+            if (::GetComputerNameA(buffer, &size)) {
+                return std::string(buffer, size);
             }
-            return "class_" + std::to_string(class_id);
-        }
-
-        bool rectTouchesImageBoundary(const cv::Rect& rect, const cv::Mat& image) {
-            if (image.empty()) {
-                return true;
+#else
+            if (::gethostname(buffer, sizeof(buffer) - 1) == 0) {
+                return std::string(buffer);
             }
-            if (rect.x <= 0 || rect.y <= 0) {
-                return true;
-            }
-            if (rect.x + rect.width >= image.cols) {
-                return true;
-            }
-            if (rect.y + rect.height >= image.rows) {
-                return true;
-            }
-            return false;
-        }
-
-        nlohmann::json detectionsToJsonForImage(
-            const std::vector<Detection>& detections,
-            const cv::Mat& image
-        ) {
-            nlohmann::json arr = nlohmann::json::array();
-
-            for (const auto& detection : detections) {
-                cv::Mat image_for_rect = image;
-                float bbox_for_rect[4] = {
-                    detection.bbox[0],
-                    detection.bbox[1],
-                    detection.bbox[2],
-                    detection.bbox[3]
-                };
-
-                cv::Rect rect = ::get_rect(image_for_rect, bbox_for_rect);
-
-                const int x1 = rect.x;
-                const int y1 = rect.y;
-                const int w = rect.width;
-                const int h = rect.height;
-                const int x2 = rect.x + rect.width;
-                const int y2 = rect.y + rect.height;
-                const int class_id = static_cast<int>(detection.class_id);
-
-                nlohmann::json item;
-                item["class_id"] = class_id;
-                item["class_name"] = classNameFromId(class_id);
-                item["confidence"] = detection.conf;
-                item["bbox"] = {
-                    {"x", x1},
-                    {"y", y1},
-                    {"w", w},
-                    {"h", h},
-                    {"x1", x1},
-                    {"y1", y1},
-                    {"x2", x2},
-                    {"y2", y2}
-                };
-                item["clipped"] = rectTouchesImageBoundary(rect, image);
-
-                arr.push_back(item);
-            }
-
-            return arr;
+#endif
+            return "unknown";
         }
 
     }  // namespace
@@ -133,6 +67,7 @@ namespace yolo11_server {
         config_(config),
         redis_queue_(makeWorkerRedisConfig(config.redis, consumer_name)) {
         config_.redis.consumer_name = consumer_name;
+        start_time_ms_ = nowMs();
     }
 
     InferenceWorker::~InferenceWorker() noexcept {
@@ -146,13 +81,13 @@ namespace yolo11_server {
         }
 
         if (!config_.redis.enabled) {
-            safeError("InferenceWorker requires redis.enabled=true.");
+            spdlog::error("InferenceWorker requires redis.enabled=true.");
             return false;
         }
 
         std::string error;
         if (!redis_queue_.connect(error)) {
-            safeError("Worker " + std::to_string(worker_id_) + " failed to connect Redis: " + error);
+            spdlog::error("Worker " + std::to_string(worker_id_) + " failed to connect Redis: " + error);
             return false;
         }
 
@@ -161,17 +96,34 @@ namespace yolo11_server {
         detector_config.gpu_id = config_.model.gpu_id;
         detector_config.use_gpu_postprocess = config_.model.use_gpu_postprocess;
 
-        safeLog("Worker " + std::to_string(worker_id_) +
+        spdlog::info("Worker " + std::to_string(worker_id_) +
             " loading TensorRT engine: " + detector_config.engine_path +
             ", consumer=" + config_.redis.consumer_name);
 
         if (!detector_.init(detector_config)) {
-            safeError("Worker " + std::to_string(worker_id_) + " failed to initialize detector.");
+            spdlog::error("Worker " + std::to_string(worker_id_) + " failed to initialize detector.");
             return false;
         }
         detector_initialized_ = true;
 
+        std::string label_error;
+        if (!label_map_.loadFromFile(config_.model.labels_path, label_error)) {
+            spdlog::warn("Worker {} failed to load labels_path='{}': {}. class_name will fall back to class_<id>.",
+                worker_id_, config_.model.labels_path, label_error);
+        }
+        else {
+            spdlog::info("Worker {} loaded {} labels from {}", worker_id_, label_map_.size(), label_map_.sourcePath());
+        }
+
+        setWorkerStatus("idle");
         running_ = true;
+
+        if (config_.worker.heartbeat_enabled) {
+            heartbeat_thread_ = std::thread([this]() {
+                heartbeatLoop();
+                });
+        }
+
         thread_ = std::thread([this]() {
             loop();
             });
@@ -182,6 +134,15 @@ namespace yolo11_server {
     void InferenceWorker::stop() noexcept {
         try {
             running_.store(false);
+
+            if (heartbeat_thread_.joinable()) {
+                if (heartbeat_thread_.get_id() == std::this_thread::get_id()) {
+                    heartbeat_thread_.detach();
+                }
+                else {
+                    heartbeat_thread_.join();
+                }
+            }
 
             if (thread_.joinable()) {
                 // stop() should normally be called by the owner thread. This guard prevents
@@ -195,10 +156,10 @@ namespace yolo11_server {
             }
         }
         catch (const std::exception& e) {
-            safeError("InferenceWorker stop exception: " + std::string(e.what()));
+            spdlog::error("InferenceWorker stop exception: " + std::string(e.what()));
         }
         catch (...) {
-            safeError("InferenceWorker stop unknown exception.");
+            spdlog::error("InferenceWorker stop unknown exception.");
         }
     }
 
@@ -212,11 +173,11 @@ namespace yolo11_server {
             detector_initialized_ = false;
         }
         catch (const std::exception& e) {
-            safeError("Detector release exception: " + std::string(e.what()));
+            spdlog::error("Detector release exception: " + std::string(e.what()));
             detector_initialized_ = false;
         }
         catch (...) {
-            safeError("Detector release unknown exception.");
+            spdlog::error("Detector release unknown exception.");
             detector_initialized_ = false;
         }
     }
@@ -230,9 +191,10 @@ namespace yolo11_server {
     }
 
     void InferenceWorker::loop() {
-        safeLog("InferenceWorker started: id=" + std::to_string(worker_id_) +
+        spdlog::info("InferenceWorker started: id=" + std::to_string(worker_id_) +
             ", consumer=" + config_.redis.consumer_name +
             ", backend=redis_stream");
+        writeHeartbeatNoexcept();
 
         while (running_.load()) {
             RedisTask task;
@@ -240,7 +202,7 @@ namespace yolo11_server {
 
             // Phase 5: recover stale pending messages first, then read new messages.
             if (redis_queue_.claimPendingTask(task, error)) {
-                safeLog("Worker " + std::to_string(worker_id_) +
+                spdlog::info("Worker " + std::to_string(worker_id_) +
                     " reclaimed pending task: task_id=" + task.task_id +
                     ", stream_id=" + task.stream_id +
                     ", consumer=" + config_.redis.consumer_name);
@@ -248,14 +210,14 @@ namespace yolo11_server {
                 continue;
             }
             if (!error.empty()) {
-                safeError("Worker " + std::to_string(worker_id_) +
+                spdlog::error("Worker " + std::to_string(worker_id_) +
                     " Redis claimPendingTask failed: " + error);
             }
 
             error.clear();
             if (!redis_queue_.popTask(task, error)) {
                 if (!error.empty()) {
-                    safeError("Worker " + std::to_string(worker_id_) +
+                    spdlog::error("Worker " + std::to_string(worker_id_) +
                         " Redis popTask failed: " + error);
                     std::this_thread::sleep_for(std::chrono::milliseconds(300));
                 }
@@ -265,7 +227,9 @@ namespace yolo11_server {
             processRedisTask(task);
         }
 
-        safeLog("InferenceWorker stopped: id=" + std::to_string(worker_id_) +
+        setWorkerStatus("stopping");
+        writeHeartbeatNoexcept();
+        spdlog::info("InferenceWorker stopped: id=" + std::to_string(worker_id_) +
             ", consumer=" + config_.redis.consumer_name);
     }
 
@@ -273,9 +237,12 @@ namespace yolo11_server {
         const long long start_time_ms = nowMs();
         const long long queue_wait_ms = task.create_time_ms > 0 ? std::max(0LL, start_time_ms - task.create_time_ms) : 0LL;
 
+        setWorkerStatus("running", task.task_id);
+        writeHeartbeatNoexcept();
+
         std::string redis_error;
         if (!redis_queue_.markRunning(task.task_id, start_time_ms, worker_id_, config_.redis.consumer_name, redis_error)) {
-            safeError("Worker " + std::to_string(worker_id_) +
+            spdlog::error("Worker " + std::to_string(worker_id_) +
                 " Redis markRunning failed: task_id=" + task.task_id +
                 ", error=" + redis_error);
         }
@@ -327,8 +294,20 @@ namespace yolo11_server {
                     if (result_bytes.empty()) {
                         throw std::runtime_error("failed to encode result image bytes");
                     }
+                    if (config_.redis.max_result_image_bytes > 0 &&
+                        static_cast<long long>(result_bytes.size()) > config_.redis.max_result_image_bytes) {
+                        throw std::runtime_error(
+                            "encoded result image is too large: " + std::to_string(result_bytes.size()) +
+                            " bytes, max_result_image_bytes=" + std::to_string(config_.redis.max_result_image_bytes)
+                        );
+                    }
+
                     std::string set_error;
-                    if (!redis_queue_.setBinaryValue(result_image_key, result_bytes, set_error)) {
+                    if (!redis_queue_.setBinaryValueWithTtl(
+                        result_image_key,
+                        result_bytes,
+                        config_.redis.result_image_ttl_seconds,
+                        set_error)) {
                         throw std::runtime_error("failed to store result image bytes to Redis: " + set_error);
                     }
                     result_image_url = "/api/v1/result/" + task.task_id + "/image";
@@ -374,7 +353,7 @@ namespace yolo11_server {
             body["create_time_ms"] = task.create_time_ms;
             body["start_time_ms"] = start_time_ms;
             body["finish_time_ms"] = finish_time_ms;
-            body["detections"] = detectionsToJsonForImage(detections, image);
+            body["detections"] = ResultSerializer::detectionsToJson(detections, image, label_map_, false);
             if (!result_image_key.empty()) {
                 body["result_image_key"] = result_image_key;
             }
@@ -388,7 +367,7 @@ namespace yolo11_server {
             const std::string result_json_text = body.dump(4);
 
             redis_error.clear();
-            if (!redis_queue_.markDone(
+            const bool mark_done_ok = redis_queue_.markDone(
                 task.task_id,
                 result_json_text,
                 result_image_key,
@@ -400,18 +379,44 @@ namespace yolo11_server {
                 total_ms,
                 worker_id_,
                 config_.redis.consumer_name,
-                redis_error)) {
-                safeError("Worker " + std::to_string(worker_id_) +
-                    " Redis markDone failed: task_id=" + task.task_id +
+                redis_error);
+
+            if (!mark_done_ok) {
+                setLastError("markDone failed: " + redis_error);
+                spdlog::error("Worker " + std::to_string(worker_id_) +
+                    " Redis markDone failed, keep task pending for reclaim: task_id=" + task.task_id +
+                    ", stream_id=" + task.stream_id +
                     ", error=" + redis_error);
+                setWorkerStatus("idle");
+                writeHeartbeatNoexcept();
+                return;
             }
 
             redis_error.clear();
-            if (!redis_queue_.ackTask(task.stream_id, redis_error)) {
-                safeError("Worker " + std::to_string(worker_id_) +
-                    " Redis ackTask failed: stream_id=" + task.stream_id +
+            const bool ack_ok = redis_queue_.ackTask(task.stream_id, redis_error);
+            if (!ack_ok) {
+                setLastError("ackTask failed: " + redis_error);
+                spdlog::error("Worker " + std::to_string(worker_id_) +
+                    " Redis ackTask failed after markDone, keep input image for reclaim: stream_id=" + task.stream_id +
                     ", error=" + redis_error);
+                setWorkerStatus("idle");
+                writeHeartbeatNoexcept();
+                return;
             }
+
+            if (config_.redis.delete_input_after_done && !task.input_image_key.empty()) {
+                std::string del_error;
+                if (!redis_queue_.deleteKey(task.input_image_key, del_error) && !del_error.empty()) {
+                    spdlog::error("Worker " + std::to_string(worker_id_) +
+                        " failed to delete input image key after done: key=" + task.input_image_key +
+                        ", error=" + del_error);
+                }
+            }
+
+            processed_count_.fetch_add(1);
+            setLastError("");
+            setWorkerStatus("idle");
+            writeHeartbeatNoexcept();
 
             if (config_.worker.log_task_done) {
                 std::ostringstream oss;
@@ -423,15 +428,18 @@ namespace yolo11_server {
                     << ", total_ms=" << total_ms
                     << ", consumer=" << config_.redis.consumer_name;
 
-                safeLog(oss.str());
+                spdlog::info(oss.str());
             }
         }
         catch (const std::exception& e) {
             const long long finish_time_ms = nowMs();
             const long long total_ms = task.create_time_ms > 0 ? std::max(0LL, finish_time_ms - task.create_time_ms) : 0LL;
 
+            failed_count_.fetch_add(1);
+            setLastError(e.what());
+
             redis_error.clear();
-            if (!redis_queue_.markFailed(
+            const bool mark_failed_ok = redis_queue_.markFailed(
                 task.task_id,
                 e.what(),
                 finish_time_ms,
@@ -439,24 +447,105 @@ namespace yolo11_server {
                 total_ms,
                 worker_id_,
                 config_.redis.consumer_name,
-                redis_error)) {
-                safeError("Worker " + std::to_string(worker_id_) +
-                    " Redis markFailed failed: task_id=" + task.task_id +
+                redis_error);
+
+            if (!mark_failed_ok) {
+                spdlog::error("Worker " + std::to_string(worker_id_) +
+                    " Redis markFailed failed, keep task pending for reclaim: task_id=" + task.task_id +
+                    ", stream_id=" + task.stream_id +
                     ", error=" + redis_error);
+                setWorkerStatus("idle");
+                writeHeartbeatNoexcept();
+                return;
             }
 
             redis_error.clear();
-            if (!redis_queue_.ackTask(task.stream_id, redis_error)) {
-                safeError("Worker " + std::to_string(worker_id_) +
-                    " Redis ackTask failed after failed task: stream_id=" + task.stream_id +
+            const bool ack_ok = redis_queue_.ackTask(task.stream_id, redis_error);
+            if (!ack_ok) {
+                spdlog::error("Worker " + std::to_string(worker_id_) +
+                    " Redis ackTask failed after markFailed, keep input image for reclaim: stream_id=" + task.stream_id +
                     ", error=" + redis_error);
+                setWorkerStatus("idle");
+                writeHeartbeatNoexcept();
+                return;
             }
 
-            safeError("Worker " + std::to_string(worker_id_) +
+            if (config_.redis.delete_input_after_done && !task.input_image_key.empty()) {
+                std::string del_error;
+                if (!redis_queue_.deleteKey(task.input_image_key, del_error) && !del_error.empty()) {
+                    spdlog::error("Worker " + std::to_string(worker_id_) +
+                        " failed to delete input image key after failed task: key=" + task.input_image_key +
+                        ", error=" + del_error);
+                }
+            }
+
+            setWorkerStatus("idle");
+            writeHeartbeatNoexcept();
+
+            spdlog::error("Worker " + std::to_string(worker_id_) +
                 " task failed: task_id=" + task.task_id +
                 ", total_ms=" + std::to_string(total_ms) +
                 ", error=" + e.what());
         }
+    }
+
+    void InferenceWorker::heartbeatLoop() noexcept {
+        while (running_.load()) {
+            writeHeartbeatNoexcept();
+            std::this_thread::sleep_for(std::chrono::milliseconds(config_.worker.heartbeat_interval_ms));
+        }
+        writeHeartbeatNoexcept();
+    }
+
+    void InferenceWorker::writeHeartbeatNoexcept() noexcept {
+        if (!config_.worker.heartbeat_enabled || !config_.redis.enabled) {
+            return;
+        }
+
+        try {
+            WorkerHeartbeatRecord heartbeat;
+            heartbeat.consumer_name = config_.redis.consumer_name;
+            heartbeat.pid = processIdString();
+            heartbeat.host = hostNameString();
+            heartbeat.worker_id = worker_id_;
+            heartbeat.gpu_id = config_.model.gpu_id;
+            heartbeat.model_type = config_.model.type;
+            heartbeat.processed_count = processed_count_.load();
+            heartbeat.failed_count = failed_count_.load();
+            heartbeat.start_time_ms = start_time_ms_;
+            heartbeat.last_heartbeat_ms = nowMs();
+
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                heartbeat.status = worker_status_;
+                heartbeat.current_task_id = current_task_id_;
+                heartbeat.last_error = last_error_;
+            }
+
+            std::string error;
+            if (!redis_queue_.writeWorkerHeartbeat(heartbeat, config_.worker.heartbeat_ttl_seconds, error)) {
+                spdlog::error("Worker " + std::to_string(worker_id_) +
+                    " heartbeat write failed: consumer=" + config_.redis.consumer_name +
+                    ", error=" + error);
+            }
+        }
+        catch (const std::exception& e) {
+            spdlog::error("Worker heartbeat exception: " + std::string(e.what()));
+        }
+        catch (...) {
+            spdlog::error("Worker heartbeat unknown exception.");
+        }
+    }
+
+    void InferenceWorker::setWorkerStatus(const std::string& status, const std::string& current_task_id) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        worker_status_ = status;
+        current_task_id_ = current_task_id;
+    }
+
+    void InferenceWorker::setLastError(const std::string& error_message) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        last_error_ = error_message;
     }
 
     std::string InferenceWorker::makeResultImageFilename(const std::string& task_id) const {

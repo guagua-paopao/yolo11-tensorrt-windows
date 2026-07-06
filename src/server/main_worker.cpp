@@ -22,8 +22,10 @@
 #endif
 
 #include <opencv2/core/utils/logger.hpp>
+#include <spdlog/spdlog.h>
 
 #include "server/app_config.h"
+#include "server/app_logger.h"
 #include "server/inference_service.h"
 #include "server/inference_worker.h"
 
@@ -181,6 +183,11 @@ int main(int argc, char** argv) {
         yolo11_server::AppConfig app_config =
             yolo11_server::AppConfig::loadFromYaml(config_path);
 
+        std::string logger_error;
+        if (!yolo11_server::initializeLogger(app_config, "worker", logger_error)) {
+            spdlog::warn("Failed to initialize spdlog logger: {}", logger_error);
+        }
+
         app_config.redis.enabled = true;
         app_config.worker.enabled = true;
 
@@ -207,21 +214,20 @@ int main(int argc, char** argv) {
             return -1;
         }
 
-        std::cout << "YOLO11 worker process starting." << std::endl;
-        std::cout << "Config path: " << config_path << std::endl;
-        std::cout << "Redis: " << app_config.redis.host << ":" << app_config.redis.port
-            << ", stream=" << app_config.redis.stream_key
-            << ", group=" << app_config.redis.consumer_group << std::endl;
-        std::cout << "Engine: " << app_config.model.engine_path << std::endl;
-        std::cout << "GPU id: " << app_config.model.gpu_id << std::endl;
+        spdlog::info("YOLO11 worker process starting.");
+        spdlog::info("Config path: {}", config_path);
+        spdlog::info("Redis: {}:{}, stream={}, group={}",
+            app_config.redis.host, app_config.redis.port, app_config.redis.stream_key, app_config.redis.consumer_group);
+        spdlog::info("Engine: {}", app_config.model.engine_path);
+        spdlog::info("Labels: {}", app_config.model.labels_path);
+        spdlog::info("GPU id: {}", app_config.model.gpu_id);
 
         if (single_consumer_mode) {
-            std::cout << "Worker mode: single consumer, consumer_name="
-                << consumer_name_override << std::endl;
+            spdlog::info("Worker mode: single consumer, consumer_name={}", consumer_name_override);
 
             yolo11_server::InferenceWorker worker(1, app_config, consumer_name_override);
             if (!worker.start()) {
-                std::cerr << "Failed to start worker: " << consumer_name_override << std::endl;
+                spdlog::error("Failed to start worker: {}", consumer_name_override);
 #ifdef _WIN32
                 WSACleanup();
 #endif
@@ -229,16 +235,15 @@ int main(int argc, char** argv) {
             }
 
             waitForStop();
-            std::cout << "Stopping worker: " << consumer_name_override << std::endl;
+            spdlog::info("Stopping worker: {}", consumer_name_override);
             worker.stop();
         }
         else {
-            std::cout << "Worker mode: internal worker pool, worker_num="
-                << app_config.worker.worker_num << std::endl;
+            spdlog::info("Worker mode: internal worker pool, worker_num={}", app_config.worker.worker_num);
 
             yolo11_server::InferenceService service(app_config);
             if (!service.start()) {
-                std::cerr << "Failed to start worker service." << std::endl;
+                spdlog::error("Failed to start worker service.");
 #ifdef _WIN32
                 WSACleanup();
 #endif
@@ -246,20 +251,22 @@ int main(int argc, char** argv) {
             }
 
             waitForStop();
-            std::cout << "Stopping worker service." << std::endl;
+            spdlog::info("Stopping worker service.");
             service.stop();
         }
 
-        std::cout << "YOLO11 worker process stopped." << std::endl;
+        spdlog::info("YOLO11 worker process stopped.");
     }
     catch (const std::exception& e) {
-        std::cerr << "Fatal worker error: " << e.what() << std::endl;
+        spdlog::error("Fatal worker error: {}", e.what());
         exit_code = -1;
     }
     catch (...) {
-        std::cerr << "Fatal worker error: unknown exception" << std::endl;
+        spdlog::error("Fatal worker error: unknown exception");
         exit_code = -1;
     }
+
+    yolo11_server::shutdownLogger();
 
 #ifdef _WIN32
     WSACleanup();

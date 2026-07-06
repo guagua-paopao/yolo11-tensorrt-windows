@@ -5,9 +5,11 @@
 #include <string>
 
 #include <crow.h>
+#include <nlohmann/json.hpp>
 
 #include "server/app_config.h"
 #include "server/redis_task_queue.h"
+#include "server/label_map.h"
 #include "yolo11_detector_api.h"
 
 namespace yolo11_server {
@@ -26,6 +28,9 @@ namespace yolo11_server {
 
     private:
         crow::response handleHealth() const;
+        crow::response handleReady() const;
+        crow::response handleWorkers() const;
+        crow::response handleMetrics() const;
         crow::response handleDetectImage(const crow::request& request);
         crow::response handleDetectImageAsync(const crow::request& request);
         crow::response handleGetAsyncResult(const std::string& task_id) const;
@@ -34,6 +39,8 @@ namespace yolo11_server {
 
         std::string extractImageBytes(const crow::request& request, std::string& error_message) const;
         bool validateBodySize(const crow::request& request, std::string& error_message) const;
+        bool validateRedisImageSize(size_t bytes, const std::string& field_name, std::string& error_message) const;
+        bool redisMemoryOverLimit(nlohmann::json* memory_json, std::string& error_message) const;
         bool isTrueParam(const char* value) const;
 
         std::string makeTaskId();
@@ -50,6 +57,7 @@ namespace yolo11_server {
         const AppConfig& config_;
         yolo11::Yolo11Detector* detector_ = nullptr;
         RedisTaskQueue redis_queue_;
+        LabelMap label_map_;
         bool redis_mode_ = false;
         bool sync_enabled_ = false;
 
