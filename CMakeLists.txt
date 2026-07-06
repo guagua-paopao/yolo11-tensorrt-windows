@@ -386,3 +386,46 @@ endif()
 
 add_dependencies(yolo11_server myplugins)
 copy_myplugins_to_target(yolo11_server)
+# ============================================================
+# Phase 7: YOLO11 Redis Stream worker process
+# Standalone Consumer process for production deployment
+# ============================================================
+add_executable(yolo11_worker
+    ${PROJECT_SOURCE_DIR}/src/server/main_worker.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/app_config.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/image_codec.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/result_serializer.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/redis_task_queue.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/inference_worker.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/inference_service.cpp
+)
+
+target_compile_definitions(yolo11_worker PRIVATE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+)
+
+if(MSVC)
+    target_compile_options(yolo11_worker PRIVATE /utf-8)
+endif()
+
+target_include_directories(yolo11_worker PRIVATE
+    "${PROJECT_INCLUDE_DIR}"
+    "${PROJECT_PLUGIN_DIR}"
+)
+
+target_link_libraries(yolo11_worker PRIVATE
+    yolo11_runtime
+    myplugins
+
+    nlohmann_json::nlohmann_json
+    yaml-cpp::yaml-cpp
+    ${YOLO11_HIREDIS_TARGET}
+)
+
+if(WIN32)
+    target_link_libraries(yolo11_worker PRIVATE ws2_32)
+endif()
+
+add_dependencies(yolo11_worker myplugins)
+copy_myplugins_to_target(yolo11_worker)

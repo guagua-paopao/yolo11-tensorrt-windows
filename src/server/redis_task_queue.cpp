@@ -12,6 +12,7 @@
 #include "server/redis_task_queue.h"
 
 #include <algorithm>
+#include <cstdarg>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -270,14 +271,86 @@ namespace yolo11_server {
 
             task.task_id = fields["task_id"];
             task.input_image_path = fields["input_image_path"];
+            task.input_image_key = fields["input_image_key"];
+            task.result_image_key = fields["result_image_key"];
             task.create_time_ms = parseLongLong(fields["create_time_ms"]);
 
-            if (task.stream_id.empty() || task.task_id.empty() || task.input_image_path.empty()) {
-                error = "invalid redis stream message: missing stream_id/task_id/input_image_path";
+            if (task.stream_id.empty() || task.task_id.empty()) {
+                error = "invalid redis stream message: missing stream_id/task_id";
+                return false;
+            }
+            if (task.input_image_key.empty() && task.input_image_path.empty()) {
+                error = "invalid redis stream message: missing input_image_key/input_image_path";
                 return false;
             }
 
             return true;
+        }
+
+        void freeRawContext(redisContext*& context) {
+            if (context != nullptr) {
+                redisFree(context);
+                context = nullptr;
+            }
+        }
+
+        bool ensureRawContextLocked(
+            const RedisSection& config,
+            redisContext*& context,
+            std::string& error,
+            int command_timeout_ms
+        ) {
+            if (context != nullptr && !context->err) {
+                return setCommandTimeout(context, command_timeout_ms, error);
+            }
+
+            freeRawContext(context);
+
+            RedisContextPtr new_context;
+            if (!connectContext(config, new_context, error, command_timeout_ms)) {
+                return false;
+            }
+
+            context = new_context.release();
+            return true;
+        }
+
+        RedisReplyPtr commandWithReconnectLocked(
+            const RedisSection& config,
+            redisContext*& context,
+            std::string& error,
+            int command_timeout_ms,
+            const char* format,
+            ...
+        ) {
+            std::string last_error;
+
+            for (int attempt = 1; attempt <= 2; ++attempt) {
+                error.clear();
+
+                if (!ensureRawContextLocked(config, context, error, command_timeout_ms)) {
+                    last_error = error;
+                    freeRawContext(context);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50 * attempt));
+                    continue;
+                }
+
+                va_list args;
+                va_start(args, format);
+                redisReply* raw_reply = static_cast<redisReply*>(redisvCommand(context, format, args));
+                va_end(args);
+
+                if (raw_reply != nullptr) {
+                    return RedisReplyPtr(raw_reply);
+                }
+
+                last_error = contextError(context, "empty redis reply");
+                freeRawContext(context);
+                std::this_thread::sleep_for(std::chrono::milliseconds(50 * attempt));
+            }
+
+            error = last_error.empty() ? "redis command failed after reconnect" : last_error;
+            return RedisReplyPtr(nullptr);
         }
 
     }  // namespace
@@ -286,19 +359,29 @@ namespace yolo11_server {
         : config_(config) {
     }
 
+    RedisTaskQueue::~RedisTaskQueue() {
+        disconnect();
+    }
+
+    void RedisTaskQueue::disconnect() const {
+        std::lock_guard<std::mutex> lock(context_mutex_);
+        freeRawContext(context_);
+    }
+
     bool RedisTaskQueue::connect(std::string& error) const {
-        RedisContextPtr context;
-        if (!connectContext(config_, context, error, 10000)) {
+        std::lock_guard<std::mutex> lock(context_mutex_);
+
+        if (!ensureRawContextLocked(config_, context_, error, 10000)) {
             return false;
         }
 
-        RedisReplyPtr ping_reply(static_cast<redisReply*>(redisCommand(context.get(), "PING")));
-        if (replyIsError(ping_reply.get(), error, context.get())) {
+        RedisReplyPtr ping_reply = commandWithReconnectLocked(config_, context_, error, 10000, "PING");
+        if (replyIsError(ping_reply.get(), error, context_)) {
             error = "PING failed: " + error;
             return false;
         }
 
-        if (!ensureConsumerGroup(context.get(), config_, error)) {
+        if (!ensureConsumerGroup(context_, config_, error)) {
             error = "XGROUP CREATE failed: " + error;
             return false;
         }
@@ -307,79 +390,144 @@ namespace yolo11_server {
     }
 
     bool RedisTaskQueue::ping(std::string& error) const {
-        RedisContextPtr context;
-        if (!connectContext(config_, context, error, 10000)) {
+        std::lock_guard<std::mutex> lock(context_mutex_);
+
+        RedisReplyPtr reply = commandWithReconnectLocked(config_, context_, error, 10000, "PING");
+        return !replyIsError(reply.get(), error, context_);
+    }
+
+    bool RedisTaskQueue::setBinaryValue(const std::string& key, const std::string& value, std::string& error) const {
+        if (key.empty()) {
+            error = "empty redis binary key";
             return false;
         }
 
-        RedisReplyPtr reply(static_cast<redisReply*>(redisCommand(context.get(), "PING")));
-        return !replyIsError(reply.get(), error, context.get());
+        std::lock_guard<std::mutex> lock(context_mutex_);
+        RedisReplyPtr reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "SETEX %s %d %b",
+            key.c_str(),
+            config_.ttl_seconds,
+            value.data(),
+            value.size()
+        );
+        return !replyIsError(reply.get(), error, context_);
+    }
+
+    bool RedisTaskQueue::getBinaryValue(const std::string& key, std::string& value, std::string& error) const {
+        value.clear();
+        if (key.empty()) {
+            error = "empty redis binary key";
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(context_mutex_);
+        RedisReplyPtr reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "GET %s",
+            key.c_str()
+        );
+        if (replyIsError(reply.get(), error, context_)) {
+            return false;
+        }
+        if (reply->type == REDIS_REPLY_NIL) {
+            error = "redis key not found: " + key;
+            return false;
+        }
+        if (reply->type != REDIS_REPLY_STRING) {
+            error = "redis key is not a binary/string value: " + key;
+            return false;
+        }
+        value.assign(reply->str, reply->len);
+        return true;
     }
 
     bool RedisTaskQueue::submitTask(const RedisTask& task, std::string& error) const {
-        RedisContextPtr context;
-        if (!connectContext(config_, context, error, 10000)) {
-            return false;
-        }
+        std::lock_guard<std::mutex> lock(context_mutex_);
 
         const std::string status_key = statusKey(task.task_id);
         const std::string meta_key = metaKey(task.task_id);
         const char* empty = "";
 
-        RedisReplyPtr status_reply(static_cast<redisReply*>(
-            redisCommand(context.get(), "SETEX %s %d %s", status_key.c_str(), config_.ttl_seconds, "queued")
-            ));
-        if (replyIsError(status_reply.get(), error, context.get())) {
+        RedisReplyPtr status_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "SETEX %s %d %s",
+            status_key.c_str(),
+            config_.ttl_seconds,
+            "queued"
+        );
+        if (replyIsError(status_reply.get(), error, context_)) {
             return false;
         }
 
-        RedisReplyPtr meta_reply(static_cast<redisReply*>(
-            redisCommand(
-                context.get(),
-                "HSET %s task_id %s input_image_path %s create_time_ms %lld start_time_ms %lld finish_time_ms %lld queue_wait_ms %lld infer_ms %s total_ms %lld worker_id %s consumer_name %s error %s result_image_path %s result_image_filename %s",
-                meta_key.c_str(),
-                task.task_id.c_str(),
-                task.input_image_path.c_str(),
-                task.create_time_ms,
-                0LL,
-                0LL,
-                0LL,
-                "0",
-                0LL,
-                empty,
-                empty,
-                empty,
-                empty,
-                empty
-            )
-            ));
-        if (replyIsError(meta_reply.get(), error, context.get())) {
+        RedisReplyPtr meta_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "HSET %s task_id %s input_image_path %s input_image_key %s result_image_key %s create_time_ms %lld start_time_ms %lld finish_time_ms %lld queue_wait_ms %lld infer_ms %s total_ms %lld worker_id %s consumer_name %s error %s result_image_path %s result_image_filename %s",
+            meta_key.c_str(),
+            task.task_id.c_str(),
+            task.input_image_path.c_str(),
+            task.input_image_key.c_str(),
+            task.result_image_key.c_str(),
+            task.create_time_ms,
+            0LL,
+            0LL,
+            0LL,
+            "0",
+            0LL,
+            empty,
+            empty,
+            empty,
+            empty,
+            empty
+        );
+        if (replyIsError(meta_reply.get(), error, context_)) {
             return false;
         }
 
-        if (!expireKey(context.get(), meta_key, config_.ttl_seconds, error)) {
+        if (!expireKey(context_, meta_key, config_.ttl_seconds, error)) {
             return false;
         }
 
-        RedisReplyPtr stream_reply(static_cast<redisReply*>(
-            redisCommand(
-                context.get(),
-                "XADD %s * task_id %s input_image_path %s create_time_ms %lld",
-                config_.stream_key.c_str(),
-                task.task_id.c_str(),
-                task.input_image_path.c_str(),
-                task.create_time_ms
-            )
-            ));
-        if (replyIsError(stream_reply.get(), error, context.get())) {
+        RedisReplyPtr stream_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "XADD %s * task_id %s input_image_key %s result_image_key %s input_image_path %s create_time_ms %lld",
+            config_.stream_key.c_str(),
+            task.task_id.c_str(),
+            task.input_image_key.c_str(),
+            task.result_image_key.c_str(),
+            task.input_image_path.c_str(),
+            task.create_time_ms
+        );
+        if (replyIsError(stream_reply.get(), error, context_)) {
             return false;
         }
 
         if (config_.stream_max_len > 0) {
-            RedisReplyPtr trim_reply(static_cast<redisReply*>(
-                redisCommand(context.get(), "XTRIM %s MAXLEN ~ %lld", config_.stream_key.c_str(), config_.stream_max_len)
-                ));
-            if (replyIsError(trim_reply.get(), error, context.get())) {
+            RedisReplyPtr trim_reply = commandWithReconnectLocked(
+                config_,
+                context_,
+                error,
+                10000,
+                "XTRIM %s MAXLEN ~ %lld",
+                config_.stream_key.c_str(),
+                config_.stream_max_len
+            );
+            if (replyIsError(trim_reply.get(), error, context_)) {
                 error = "XTRIM failed: " + error;
                 return false;
             }
@@ -395,41 +543,47 @@ namespace yolo11_server {
         const std::string& consumer_name,
         std::string& error
     ) const {
-        RedisContextPtr context;
-        if (!connectContext(config_, context, error, 10000)) {
-            return false;
-        }
+        std::lock_guard<std::mutex> lock(context_mutex_);
 
         const std::string status_key = statusKey(task_id);
         const std::string meta_key = metaKey(task_id);
 
-        RedisReplyPtr status_reply(static_cast<redisReply*>(
-            redisCommand(context.get(), "SETEX %s %d %s", status_key.c_str(), config_.ttl_seconds, "running")
-            ));
-        if (replyIsError(status_reply.get(), error, context.get())) {
+        RedisReplyPtr status_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "SETEX %s %d %s",
+            status_key.c_str(),
+            config_.ttl_seconds,
+            "running"
+        );
+        if (replyIsError(status_reply.get(), error, context_)) {
             return false;
         }
 
-        RedisReplyPtr meta_reply(static_cast<redisReply*>(
-            redisCommand(
-                context.get(),
-                "HSET %s start_time_ms %lld worker_id %d consumer_name %s",
-                meta_key.c_str(),
-                start_time_ms,
-                worker_id,
-                consumer_name.c_str()
-            )
-            ));
-        if (replyIsError(meta_reply.get(), error, context.get())) {
+        RedisReplyPtr meta_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "HSET %s start_time_ms %lld worker_id %d consumer_name %s",
+            meta_key.c_str(),
+            start_time_ms,
+            worker_id,
+            consumer_name.c_str()
+        );
+        if (replyIsError(meta_reply.get(), error, context_)) {
             return false;
         }
 
-        return expireKey(context.get(), meta_key, config_.ttl_seconds, error);
+        return expireKey(context_, meta_key, config_.ttl_seconds, error);
     }
 
     bool RedisTaskQueue::markDone(
         const std::string& task_id,
         const std::string& result_json_text,
+        const std::string& result_image_key,
         const std::string& result_image_path,
         const std::string& result_image_filename,
         long long finish_time_ms,
@@ -440,51 +594,64 @@ namespace yolo11_server {
         const std::string& consumer_name,
         std::string& error
     ) const {
-        RedisContextPtr context;
-        if (!connectContext(config_, context, error, 10000)) {
-            return false;
-        }
+        std::lock_guard<std::mutex> lock(context_mutex_);
 
         const std::string status_key = statusKey(task_id);
         const std::string result_key = resultKey(task_id);
         const std::string meta_key = metaKey(task_id);
         const char* empty = "";
 
-        RedisReplyPtr result_reply(static_cast<redisReply*>(
-            redisCommand(context.get(), "SETEX %s %d %s", result_key.c_str(), config_.ttl_seconds, result_json_text.c_str())
-            ));
-        if (replyIsError(result_reply.get(), error, context.get())) {
+        RedisReplyPtr result_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "SETEX %s %d %s",
+            result_key.c_str(),
+            config_.ttl_seconds,
+            result_json_text.c_str()
+        );
+        if (replyIsError(result_reply.get(), error, context_)) {
             return false;
         }
 
-        RedisReplyPtr meta_reply(static_cast<redisReply*>(
-            redisCommand(
-                context.get(),
-                "HSET %s finish_time_ms %lld result_image_path %s result_image_filename %s queue_wait_ms %lld infer_ms %.6f total_ms %lld worker_id %d consumer_name %s error %s",
-                meta_key.c_str(),
-                finish_time_ms,
-                result_image_path.c_str(),
-                result_image_filename.c_str(),
-                queue_wait_ms,
-                infer_ms,
-                total_ms,
-                worker_id,
-                consumer_name.c_str(),
-                empty
-            )
-            ));
-        if (replyIsError(meta_reply.get(), error, context.get())) {
+        RedisReplyPtr meta_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "HSET %s finish_time_ms %lld result_image_key %s result_image_path %s result_image_filename %s queue_wait_ms %lld infer_ms %.6f total_ms %lld worker_id %d consumer_name %s error %s",
+            meta_key.c_str(),
+            finish_time_ms,
+            result_image_key.c_str(),
+            result_image_path.c_str(),
+            result_image_filename.c_str(),
+            queue_wait_ms,
+            infer_ms,
+            total_ms,
+            worker_id,
+            consumer_name.c_str(),
+            empty
+        );
+        if (replyIsError(meta_reply.get(), error, context_)) {
             return false;
         }
 
-        if (!expireKey(context.get(), meta_key, config_.ttl_seconds, error)) {
+        if (!expireKey(context_, meta_key, config_.ttl_seconds, error)) {
             return false;
         }
 
-        RedisReplyPtr status_reply(static_cast<redisReply*>(
-            redisCommand(context.get(), "SETEX %s %d %s", status_key.c_str(), config_.ttl_seconds, "done")
-            ));
-        if (replyIsError(status_reply.get(), error, context.get())) {
+        RedisReplyPtr status_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "SETEX %s %d %s",
+            status_key.c_str(),
+            config_.ttl_seconds,
+            "done"
+        );
+        if (replyIsError(status_reply.get(), error, context_)) {
             return false;
         }
 
@@ -501,39 +668,44 @@ namespace yolo11_server {
         const std::string& consumer_name,
         std::string& error
     ) const {
-        RedisContextPtr context;
-        if (!connectContext(config_, context, error, 10000)) {
-            return false;
-        }
+        std::lock_guard<std::mutex> lock(context_mutex_);
 
         const std::string status_key = statusKey(task_id);
         const std::string meta_key = metaKey(task_id);
 
-        RedisReplyPtr meta_reply(static_cast<redisReply*>(
-            redisCommand(
-                context.get(),
-                "HSET %s finish_time_ms %lld queue_wait_ms %lld total_ms %lld worker_id %d consumer_name %s error %s",
-                meta_key.c_str(),
-                finish_time_ms,
-                queue_wait_ms,
-                total_ms,
-                worker_id,
-                consumer_name.c_str(),
-                error_message.c_str()
-            )
-            ));
-        if (replyIsError(meta_reply.get(), error, context.get())) {
+        RedisReplyPtr meta_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "HSET %s finish_time_ms %lld queue_wait_ms %lld total_ms %lld worker_id %d consumer_name %s error %s",
+            meta_key.c_str(),
+            finish_time_ms,
+            queue_wait_ms,
+            total_ms,
+            worker_id,
+            consumer_name.c_str(),
+            error_message.c_str()
+        );
+        if (replyIsError(meta_reply.get(), error, context_)) {
             return false;
         }
 
-        if (!expireKey(context.get(), meta_key, config_.ttl_seconds, error)) {
+        if (!expireKey(context_, meta_key, config_.ttl_seconds, error)) {
             return false;
         }
 
-        RedisReplyPtr status_reply(static_cast<redisReply*>(
-            redisCommand(context.get(), "SETEX %s %d %s", status_key.c_str(), config_.ttl_seconds, "failed")
-            ));
-        if (replyIsError(status_reply.get(), error, context.get())) {
+        RedisReplyPtr status_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "SETEX %s %d %s",
+            status_key.c_str(),
+            config_.ttl_seconds,
+            "failed"
+        );
+        if (replyIsError(status_reply.get(), error, context_)) {
             return false;
         }
 
@@ -544,19 +716,21 @@ namespace yolo11_server {
         status = RedisTaskStatus{};
         status.task_id = task_id;
 
-        RedisContextPtr context;
-        if (!connectContext(config_, context, error, 10000)) {
-            return false;
-        }
+        std::lock_guard<std::mutex> lock(context_mutex_);
 
         const std::string status_key = statusKey(task_id);
         const std::string result_key = resultKey(task_id);
         const std::string meta_key = metaKey(task_id);
 
-        RedisReplyPtr status_reply(static_cast<redisReply*>(
-            redisCommand(context.get(), "GET %s", status_key.c_str())
-            ));
-        if (replyIsError(status_reply.get(), error, context.get())) {
+        RedisReplyPtr status_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "GET %s",
+            status_key.c_str()
+        );
+        if (replyIsError(status_reply.get(), error, context_)) {
             return false;
         }
         if (status_reply->type == REDIS_REPLY_NIL) {
@@ -567,16 +741,23 @@ namespace yolo11_server {
         status.found = true;
         status.status = replyString(status_reply.get());
 
-        RedisReplyPtr meta_reply(static_cast<redisReply*>(
-            redisCommand(context.get(), "HGETALL %s", meta_key.c_str())
-            ));
-        if (!replyIsError(meta_reply.get(), error, context.get())) {
+        RedisReplyPtr meta_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "HGETALL %s",
+            meta_key.c_str()
+        );
+        if (!replyIsError(meta_reply.get(), error, context_)) {
             const auto values = parseHashReply(meta_reply.get());
             auto getValue = [&values](const std::string& key) -> std::string {
                 auto it = values.find(key);
                 return it == values.end() ? std::string{} : it->second;
                 };
             status.error = getValue("error");
+            status.input_image_key = getValue("input_image_key");
+            status.result_image_key = getValue("result_image_key");
             status.result_image_path = getValue("result_image_path");
             status.result_image_filename = getValue("result_image_filename");
             status.worker_id = getValue("worker_id");
@@ -590,10 +771,15 @@ namespace yolo11_server {
         }
 
         if (status.status == "done") {
-            RedisReplyPtr result_reply(static_cast<redisReply*>(
-                redisCommand(context.get(), "GET %s", result_key.c_str())
-                ));
-            if (replyIsError(result_reply.get(), error, context.get())) {
+            RedisReplyPtr result_reply = commandWithReconnectLocked(
+                config_,
+                context_,
+                error,
+                10000,
+                "GET %s",
+                result_key.c_str()
+            );
+            if (replyIsError(result_reply.get(), error, context_)) {
                 return false;
             }
             if (result_reply->type != REDIS_REPLY_NIL) {
@@ -608,25 +794,23 @@ namespace yolo11_server {
         task = RedisTask{};
         error.clear();
 
-        RedisContextPtr context;
-        const int pop_timeout_ms = std::max(config_.block_ms + 5000, 8000);
-        if (!connectContext(config_, context, error, pop_timeout_ms)) {
-            return false;
-        }
+        std::lock_guard<std::mutex> lock(context_mutex_);
 
-        RedisReplyPtr reply(static_cast<redisReply*>(
-            redisCommand(
-                context.get(),
-                "XREADGROUP GROUP %s %s COUNT 1 BLOCK %d STREAMS %s >",
-                config_.consumer_group.c_str(),
-                config_.consumer_name.c_str(),
-                config_.block_ms,
-                config_.stream_key.c_str()
-            )
-            ));
+        const int pop_timeout_ms = std::max(config_.block_ms + 5000, 8000);
+        RedisReplyPtr reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            pop_timeout_ms,
+            "XREADGROUP GROUP %s %s COUNT 1 BLOCK %d STREAMS %s >",
+            config_.consumer_group.c_str(),
+            config_.consumer_name.c_str(),
+            config_.block_ms,
+            config_.stream_key.c_str()
+        );
 
         if (reply == nullptr) {
-            error = contextError(context.get(), "empty redis reply when reading stream");
+            error = contextError(context_, "empty redis reply when reading stream");
             return false;
         }
 
@@ -639,7 +823,7 @@ namespace yolo11_server {
             error = replyString(reply.get());
             if (containsText(error, "NOGROUP")) {
                 std::string group_error;
-                if (ensureConsumerGroup(context.get(), config_, group_error)) {
+                if (ensureConsumerGroup(context_, config_, group_error)) {
                     error.clear();
                 }
             }
@@ -674,24 +858,22 @@ namespace yolo11_server {
             return false;
         }
 
-        RedisContextPtr context;
-        if (!connectContext(config_, context, error, 10000)) {
-            return false;
-        }
+        std::lock_guard<std::mutex> lock(context_mutex_);
 
-        RedisReplyPtr reply(static_cast<redisReply*>(
-            redisCommand(
-                context.get(),
-                "XAUTOCLAIM %s %s %s %lld 0-0 COUNT 1",
-                config_.stream_key.c_str(),
-                config_.consumer_group.c_str(),
-                config_.consumer_name.c_str(),
-                config_.pending_min_idle_ms
-            )
-            ));
+        RedisReplyPtr reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "XAUTOCLAIM %s %s %s %lld 0-0 COUNT 1",
+            config_.stream_key.c_str(),
+            config_.consumer_group.c_str(),
+            config_.consumer_name.c_str(),
+            config_.pending_min_idle_ms
+        );
 
         if (reply == nullptr) {
-            error = contextError(context.get(), "empty redis reply when XAUTOCLAIM");
+            error = contextError(context_, "empty redis reply when XAUTOCLAIM");
             return false;
         }
 
@@ -699,7 +881,7 @@ namespace yolo11_server {
             error = replyString(reply.get());
             if (containsText(error, "NOGROUP")) {
                 std::string group_error;
-                if (ensureConsumerGroup(context.get(), config_, group_error)) {
+                if (ensureConsumerGroup(context_, config_, group_error)) {
                     error.clear();
                 }
             }
@@ -725,36 +907,36 @@ namespace yolo11_server {
             return true;
         }
 
-        RedisContextPtr context;
-        if (!connectContext(config_, context, error, 10000)) {
-            return false;
-        }
+        std::lock_guard<std::mutex> lock(context_mutex_);
 
-        RedisReplyPtr reply(static_cast<redisReply*>(
-            redisCommand(
-                context.get(),
-                "XACK %s %s %s",
-                config_.stream_key.c_str(),
-                config_.consumer_group.c_str(),
-                stream_id.c_str()
-            )
-            ));
+        RedisReplyPtr reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "XACK %s %s %s",
+            config_.stream_key.c_str(),
+            config_.consumer_group.c_str(),
+            stream_id.c_str()
+        );
 
-        return !replyIsError(reply.get(), error, context.get());
+        return !replyIsError(reply.get(), error, context_);
     }
 
     bool RedisTaskQueue::getStreamStats(RedisStreamStats& stats, std::string& error) const {
         stats = RedisStreamStats{};
 
-        RedisContextPtr context;
-        if (!connectContext(config_, context, error, 10000)) {
-            return false;
-        }
+        std::lock_guard<std::mutex> lock(context_mutex_);
 
-        RedisReplyPtr xlen_reply(static_cast<redisReply*>(
-            redisCommand(context.get(), "XLEN %s", config_.stream_key.c_str())
-            ));
-        if (replyIsError(xlen_reply.get(), error, context.get())) {
+        RedisReplyPtr xlen_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "XLEN %s",
+            config_.stream_key.c_str()
+        );
+        if (replyIsError(xlen_reply.get(), error, context_)) {
             error = "XLEN failed: " + error;
             return false;
         }
@@ -762,10 +944,16 @@ namespace yolo11_server {
             stats.stream_len = xlen_reply->integer;
         }
 
-        RedisReplyPtr pending_reply(static_cast<redisReply*>(
-            redisCommand(context.get(), "XPENDING %s %s", config_.stream_key.c_str(), config_.consumer_group.c_str())
-            ));
-        if (replyIsError(pending_reply.get(), error, context.get())) {
+        RedisReplyPtr pending_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "XPENDING %s %s",
+            config_.stream_key.c_str(),
+            config_.consumer_group.c_str()
+        );
+        if (replyIsError(pending_reply.get(), error, context_)) {
             error = "XPENDING failed: " + error;
             return false;
         }
@@ -777,6 +965,14 @@ namespace yolo11_server {
         }
 
         return true;
+    }
+
+    std::string RedisTaskQueue::inputImageKey(const std::string& task_id) const {
+        return "yolo:image:" + task_id + ":input";
+    }
+
+    std::string RedisTaskQueue::resultImageKey(const std::string& task_id) const {
+        return "yolo:image:" + task_id + ":result";
     }
 
     std::string RedisTaskQueue::statusKey(const std::string& task_id) const {

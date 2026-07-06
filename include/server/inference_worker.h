@@ -15,13 +15,13 @@ namespace yolo11_server {
     class InferenceWorker {
     public:
         InferenceWorker(int worker_id, const AppConfig& config, const std::string& consumer_name);
-        ~InferenceWorker();
+        ~InferenceWorker() noexcept;
 
         InferenceWorker(const InferenceWorker&) = delete;
         InferenceWorker& operator=(const InferenceWorker&) = delete;
 
         bool start();
-        void stop();
+        void stop() noexcept;
 
         bool running() const;
         std::string consumerName() const;
@@ -29,6 +29,7 @@ namespace yolo11_server {
     private:
         void loop();
         void processRedisTask(const RedisTask& task);
+        void releaseDetectorNoexcept() noexcept;
 
         std::string makeResultImageFilename(const std::string& task_id) const;
         std::string makeResultImagePath(const std::string& filename) const;

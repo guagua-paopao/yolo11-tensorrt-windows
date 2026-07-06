@@ -1,15 +1,25 @@
 #pragma once
 
+#include <mutex>
 #include <string>
 
 #include "server/app_config.h"
+
+struct redisContext;
 
 namespace yolo11_server {
 
     struct RedisTask {
         std::string stream_id;
         std::string task_id;
+
+        // Production path: image bytes are stored in Redis, so server/worker can be separated.
+        std::string input_image_key;
+        std::string result_image_key;
+
+        // Backward-compatible fallback for all-in-one/local-file mode.
         std::string input_image_path;
+
         long long create_time_ms = 0;
     };
 
@@ -19,6 +29,8 @@ namespace yolo11_server {
         std::string status;
         std::string error;
         std::string result_json_text;
+        std::string input_image_key;
+        std::string result_image_key;
         std::string result_image_path;
         std::string result_image_filename;
         std::string worker_id;
@@ -39,8 +51,13 @@ namespace yolo11_server {
     class RedisTaskQueue {
     public:
         explicit RedisTaskQueue(const RedisSection& config);
+        ~RedisTaskQueue();
+
+        RedisTaskQueue(const RedisTaskQueue&) = delete;
+        RedisTaskQueue& operator=(const RedisTaskQueue&) = delete;
 
         bool connect(std::string& error) const;
+        void disconnect() const;
         bool ping(std::string& error) const;
 
         bool submitTask(const RedisTask& task, std::string& error) const;
@@ -56,6 +73,7 @@ namespace yolo11_server {
         bool markDone(
             const std::string& task_id,
             const std::string& result_json_text,
+            const std::string& result_image_key,
             const std::string& result_image_path,
             const std::string& result_image_filename,
             long long finish_time_ms,
@@ -86,6 +104,13 @@ namespace yolo11_server {
 
         bool getStreamStats(RedisStreamStats& stats, std::string& error) const;
 
+        // Binary value helpers used for image bytes.
+        bool setBinaryValue(const std::string& key, const std::string& value, std::string& error) const;
+        bool getBinaryValue(const std::string& key, std::string& value, std::string& error) const;
+
+        std::string inputImageKey(const std::string& task_id) const;
+        std::string resultImageKey(const std::string& task_id) const;
+
     private:
         std::string statusKey(const std::string& task_id) const;
         std::string resultKey(const std::string& task_id) const;
@@ -93,6 +118,11 @@ namespace yolo11_server {
 
     private:
         RedisSection config_;
+
+        // One hiredis connection per RedisTaskQueue instance.
+        // Protected because HttpController can be called by multiple Crow threads.
+        mutable std::mutex context_mutex_;
+        mutable redisContext* context_ = nullptr;
     };
 
 }  // namespace yolo11_server

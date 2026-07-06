@@ -2,7 +2,6 @@ server:
   host: "0.0.0.0"
   port: 8080
   threads: 4
-  # Production default: HTTP process only submits/query tasks and does not load TensorRT.
   enable_sync_detect: false
   max_body_size_mb: 16
 
@@ -31,11 +30,10 @@ redis:
   ttl_seconds: 1800
   stream_max_len: 10000
   enable_pending_reclaim: true
-  pending_min_idle_ms: 10000
+  pending_min_idle_ms: 60000
 
 worker:
-  # Production default: worker runs in yolo11_worker.exe, not inside yolo11_server.exe.
-  enabled: false
+  enabled: true
   worker_num: 3
   consumer_name_prefix: "worker_"
   log_task_done: false

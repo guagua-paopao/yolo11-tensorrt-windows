@@ -148,21 +148,14 @@ namespace yolo11_server {
             return buffer.str();
         }
 
-        bool writeBytesToFile(const std::string& path, const std::string& bytes) {
-            std::ofstream file(path, std::ios::binary);
-            if (!file.is_open()) {
-                return false;
-            }
-            file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-            return file.good();
-        }
-
     }  // namespace
 
-    HttpController::HttpController(const AppConfig& config, yolo11::Yolo11Detector& detector)
+    HttpController::HttpController(const AppConfig& config, yolo11::Yolo11Detector* detector)
         : config_(config), detector_(detector), redis_queue_(config.redis) {
         std::filesystem::create_directories(config_.output.input_dir);
         std::filesystem::create_directories(config_.output.output_dir);
+
+        sync_enabled_ = config_.server.enable_sync_detect && detector_ != nullptr;
 
         if (config_.redis.enabled) {
             std::string error;
@@ -179,6 +172,10 @@ namespace yolo11_server {
         else {
             redis_mode_ = false;
             std::cout << "Redis queue disabled. Async HTTP API will return 503." << std::endl;
+        }
+
+        if (!sync_enabled_) {
+            std::cout << "Sync detect endpoint is disabled in this process." << std::endl;
         }
     }
 
@@ -207,6 +204,12 @@ namespace yolo11_server {
             return handleGetAsyncResult(task_id);
                 });
 
+        CROW_ROUTE(app, "/api/v1/result/<string>/image")
+            .methods(crow::HTTPMethod::GET)
+            ([this](const std::string& task_id) {
+            return handleGetResultImageByTaskId(task_id);
+                });
+
         CROW_ROUTE(app, "/api/v1/image/<string>")
             .methods(crow::HTTPMethod::GET)
             ([this](const std::string& filename) {
@@ -219,16 +222,16 @@ namespace yolo11_server {
         body["success"] = true;
         body["status"] = "ok";
         body["service"] = "yolo11_server";
-        body["phase"] = redis_mode_ ? "phase4_redis_stream_worker_pool" : "phase4_sync_only_without_redis";
+        body["phase"] = "phase7_server_worker_split_ready";
+        body["role"] = "http_producer";
         body["model_type"] = config_.model.type;
         body["engine_path"] = config_.model.engine_path;
         body["gpu_id"] = config_.model.gpu_id;
-        body["use_gpu_postprocess"] = config_.model.use_gpu_postprocess;
+        body["sync_detect_enabled"] = sync_enabled_;
+        body["embedded_worker_enabled"] = config_.worker.enabled;
         body["queue_backend"] = redis_mode_ ? "redis_stream" : "disabled";
-        body["worker_num"] = redis_mode_ ? config_.worker.worker_num : 0;
-        body["worker_note"] = redis_mode_
-            ? "async inference is consumed by InferenceService workers"
-            : "redis.enabled=false, async endpoint is disabled";
+        body["worker_num"] = config_.worker.enabled ? config_.worker.worker_num : 0;
+        body["image_storage"] = redis_mode_ ? "redis_binary_keys" : "local_file_only";
 
         if (redis_mode_) {
             std::string redis_error;
@@ -263,14 +266,31 @@ namespace yolo11_server {
     }
 
     crow::response HttpController::handleDetectImage(const crow::request& request) {
+        if (!sync_enabled_) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "SYNC_DETECT_DISABLED";
+            body["error"] = "sync detection is disabled in this server process. Use /api/v1/detect/image/async.";
+            return makeJsonResponse(503, body);
+        }
+
         const auto request_id = ++request_counter_;
 
         std::string error_message;
+        if (!validateBodySize(request, error_message)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REQUEST_TOO_LARGE";
+            body["error"] = error_message;
+            return makeJsonResponse(413, body);
+        }
+
         std::string image_bytes = extractImageBytes(request, error_message);
 
         if (image_bytes.empty()) {
             nlohmann::json body;
             body["success"] = false;
+            body["error_code"] = "EMPTY_IMAGE_BODY";
             body["error"] = error_message.empty() ? "empty image body" : error_message;
             return makeJsonResponse(400, body);
         }
@@ -279,6 +299,7 @@ namespace yolo11_server {
         if (image.empty()) {
             nlohmann::json body;
             body["success"] = false;
+            body["error_code"] = "IMAGE_DECODE_FAILED";
             body["error"] = "failed to decode image. Please upload a valid jpg/png image.";
             return makeJsonResponse(400, body);
         }
@@ -294,13 +315,10 @@ namespace yolo11_server {
 
         auto t0 = std::chrono::steady_clock::now();
         {
-            // The sync API still reuses one detector from main_server.
-            // Keep this lock because Crow may call the sync API concurrently.
-            // Async workers do not use this detector or this lock.
             std::lock_guard<std::mutex> lock(sync_detector_mutex_);
-            detections = detector_.infer(image);
+            detections = detector_->infer(image);
             if (draw || config_.output.save_result_image) {
-                result_image = detector_.draw(image, detections);
+                result_image = detector_->draw(image, detections);
             }
         }
         auto t1 = std::chrono::steady_clock::now();
@@ -364,16 +382,26 @@ namespace yolo11_server {
         if (!redis_mode_) {
             nlohmann::json body;
             body["success"] = false;
-            body["error"] = "async inference requires redis.enabled=true in Phase 4";
+            body["error_code"] = "REDIS_DISABLED";
+            body["error"] = "async inference requires redis.enabled=true";
             return makeJsonResponse(503, body);
         }
 
         std::string error_message;
+        if (!validateBodySize(request, error_message)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REQUEST_TOO_LARGE";
+            body["error"] = error_message;
+            return makeJsonResponse(413, body);
+        }
+
         std::string image_bytes = extractImageBytes(request, error_message);
 
         if (image_bytes.empty()) {
             nlohmann::json body;
             body["success"] = false;
+            body["error_code"] = "EMPTY_IMAGE_BODY";
             body["error"] = error_message.empty() ? "empty image body" : error_message;
             return makeJsonResponse(400, body);
         }
@@ -382,33 +410,57 @@ namespace yolo11_server {
         if (image.empty()) {
             nlohmann::json body;
             body["success"] = false;
+            body["error_code"] = "IMAGE_DECODE_FAILED";
             body["error"] = "failed to decode image. Please upload a valid jpg/png image.";
             return makeJsonResponse(400, body);
         }
 
         const std::string task_id = makeTaskId();
+        const std::string input_key = redis_queue_.inputImageKey(task_id);
+        const std::string result_key = redis_queue_.resultImageKey(task_id);
         const std::string input_path = makeInputImagePath(task_id);
-        std::filesystem::create_directories(config_.output.input_dir);
 
-        // Normalize async input as JPEG after successful decode.
-        // This avoids mismatches such as PNG bytes saved with a .jpg suffix.
-        std::vector<int> input_params = { cv::IMWRITE_JPEG_QUALITY, config_.output.jpeg_quality };
-        if (!cv::imwrite(input_path, image, input_params)) {
+        // Normalize input to JPEG bytes. Redis binary storage makes server and worker separable.
+        std::string normalized_jpeg = ImageCodec::encodeJpegBytes(image, config_.output.jpeg_quality);
+        if (normalized_jpeg.empty()) {
             nlohmann::json body;
             body["success"] = false;
-            body["error"] = "failed to save normalized input image";
+            body["error_code"] = "IMAGE_ENCODE_FAILED";
+            body["error"] = "failed to encode normalized input image";
             return makeJsonResponse(500, body);
+        }
+
+        std::string redis_error;
+        if (!redis_queue_.setBinaryValue(input_key, normalized_jpeg, redis_error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_SET_INPUT_FAILED";
+            body["error"] = "failed to store input image bytes to Redis";
+            body["redis_error"] = redis_error;
+            return makeJsonResponse(500, body);
+        }
+
+        // Local input is only a compatibility/debug fallback. Worker will prefer Redis bytes.
+        try {
+            std::filesystem::create_directories(config_.output.input_dir);
+            cv::imwrite(input_path, image, { cv::IMWRITE_JPEG_QUALITY, config_.output.jpeg_quality });
+        }
+        catch (...) {
+            // Do not fail the request: Redis bytes are the production input source.
         }
 
         RedisTask task;
         task.task_id = task_id;
+        task.input_image_key = input_key;
+        task.result_image_key = result_key;
         task.input_image_path = input_path;
         task.create_time_ms = nowMs();
 
-        std::string redis_error;
+        redis_error.clear();
         if (!redis_queue_.submitTask(task, redis_error)) {
             nlohmann::json body;
             body["success"] = false;
+            body["error_code"] = "REDIS_SUBMIT_FAILED";
             body["error"] = "failed to submit task to Redis";
             body["redis_error"] = redis_error;
             return makeJsonResponse(500, body);
@@ -419,7 +471,11 @@ namespace yolo11_server {
         body["task_id"] = task_id;
         body["status"] = "queued";
         body["queue_backend"] = "redis_stream";
+        body["image_storage"] = "redis_binary_keys";
+        body["input_image_key"] = input_key;
+        body["result_image_key"] = result_key;
         body["result_url"] = "/api/v1/result/" + task_id;
+        body["result_image_url"] = "/api/v1/result/" + task_id + "/image";
 
         return makeJsonResponse(202, body);
     }
@@ -428,7 +484,8 @@ namespace yolo11_server {
         if (!redis_mode_) {
             nlohmann::json body;
             body["success"] = false;
-            body["error"] = "async result query requires redis.enabled=true in Phase 4";
+            body["error_code"] = "REDIS_DISABLED";
+            body["error"] = "async result query requires redis.enabled=true";
             body["task_id"] = task_id;
             return makeJsonResponse(503, body);
         }
@@ -438,6 +495,7 @@ namespace yolo11_server {
         if (!redis_queue_.getTaskStatus(task_id, task_status, redis_error)) {
             nlohmann::json body;
             body["success"] = false;
+            body["error_code"] = "REDIS_QUERY_FAILED";
             body["error"] = "failed to query Redis task status";
             body["redis_error"] = redis_error;
             body["task_id"] = task_id;
@@ -447,6 +505,7 @@ namespace yolo11_server {
         if (!task_status.found) {
             nlohmann::json body;
             body["success"] = false;
+            body["error_code"] = "TASK_NOT_FOUND";
             body["error"] = "task not found or expired";
             body["task_id"] = task_id;
             return makeJsonResponse(404, body);
@@ -463,6 +522,7 @@ namespace yolo11_server {
         body["task_id"] = task_status.task_id;
         body["status"] = task_status.status;
         body["queue_backend"] = "redis_stream";
+        body["image_storage"] = "redis_binary_keys";
         body["create_time_ms"] = task_status.create_time_ms;
         body["start_time_ms"] = task_status.start_time_ms;
         body["finish_time_ms"] = task_status.finish_time_ms;
@@ -475,22 +535,62 @@ namespace yolo11_server {
         if (!task_status.consumer_name.empty()) {
             body["consumer_name"] = task_status.consumer_name;
         }
+        if (!task_status.input_image_key.empty()) {
+            body["input_image_key"] = task_status.input_image_key;
+        }
+        if (!task_status.result_image_key.empty()) {
+            body["result_image_key"] = task_status.result_image_key;
+            body["result_image_url"] = "/api/v1/result/" + task_id + "/image";
+        }
 
         if (!task_status.error.empty()) {
             body["error"] = task_status.error;
         }
         if (!task_status.result_image_filename.empty()) {
             body["result_image_filename"] = task_status.result_image_filename;
-            body["result_image_url"] = "/api/v1/image/" + task_status.result_image_filename;
+            body["legacy_result_image_url"] = "/api/v1/image/" + task_status.result_image_filename;
         }
 
         return makeJsonResponse(200, body);
+    }
+
+    crow::response HttpController::handleGetResultImageByTaskId(const std::string& task_id) const {
+        if (!redis_mode_) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_DISABLED";
+            body["error"] = "result image by task_id requires redis.enabled=true";
+            body["task_id"] = task_id;
+            return makeJsonResponse(503, body);
+        }
+
+        const std::string image_key = redis_queue_.resultImageKey(task_id);
+        std::string bytes;
+        std::string redis_error;
+        if (!redis_queue_.getBinaryValue(image_key, bytes, redis_error) || bytes.empty()) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "RESULT_IMAGE_NOT_FOUND";
+            body["error"] = "result image not found or expired";
+            body["task_id"] = task_id;
+            body["redis_key"] = image_key;
+            body["redis_error"] = redis_error;
+            return makeJsonResponse(404, body);
+        }
+
+        crow::response response;
+        response.code = 200;
+        response.body = bytes;
+        response.set_header("Content-Type", "image/jpeg");
+        response.set_header("Cache-Control", "no-store");
+        return response;
     }
 
     crow::response HttpController::handleGetResultImage(const std::string& filename) const {
         if (!isSafeImageFilename(filename)) {
             nlohmann::json body;
             body["success"] = false;
+            body["error_code"] = "INVALID_IMAGE_FILENAME";
             body["error"] = "invalid image filename";
             return makeJsonResponse(400, body);
         }
@@ -501,6 +601,7 @@ namespace yolo11_server {
         if (bytes.empty()) {
             nlohmann::json body;
             body["success"] = false;
+            body["error_code"] = "LOCAL_IMAGE_NOT_FOUND";
             body["error"] = "image not found";
             body["filename"] = filename;
             return makeJsonResponse(404, body);
@@ -512,6 +613,18 @@ namespace yolo11_server {
         response.set_header("Content-Type", guessImageContentType(filename));
         response.set_header("Cache-Control", "no-store");
         return response;
+    }
+
+    bool HttpController::validateBodySize(const crow::request& request, std::string& error_message) const {
+        if (config_.server.max_body_size_mb <= 0) {
+            return true;
+        }
+        const size_t max_bytes = static_cast<size_t>(config_.server.max_body_size_mb) * 1024ULL * 1024ULL;
+        if (request.body.size() > max_bytes) {
+            error_message = "request body too large. max_body_size_mb=" + std::to_string(config_.server.max_body_size_mb);
+            return false;
+        }
+        return true;
     }
 
     std::string HttpController::extractImageBytes(const crow::request& request, std::string& error_message) const {
@@ -558,6 +671,7 @@ namespace yolo11_server {
     std::string HttpController::makeTaskId() {
         auto now = std::chrono::system_clock::now();
         auto now_time_t = std::chrono::system_clock::to_time_t(now);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
         std::tm tm_value{};
 
 #ifdef _WIN32
@@ -568,6 +682,7 @@ namespace yolo11_server {
 
         std::ostringstream oss;
         oss << std::put_time(&tm_value, "%Y%m%d_%H%M%S")
+            << "_" << std::setw(3) << std::setfill('0') << ms
             << "_" << ++task_counter_;
         return oss.str();
     }

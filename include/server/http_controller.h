@@ -12,13 +12,11 @@
 
 namespace yolo11_server {
 
-    // Phase 4: HttpController only handles the HTTP layer.
-    // 1. The sync API uses the detector created in main_server.
-    // 2. The async API saves input images, submits Redis Stream tasks, and queries Redis results.
-    // 3. Redis consumption and async TensorRT inference are handled by InferenceService/InferenceWorker.
+    // Production role: HTTP producer + result query.
+    // Sync detection is optional and should usually be disabled in production.
     class HttpController {
     public:
-        HttpController(const AppConfig& config, yolo11::Yolo11Detector& detector);
+        HttpController(const AppConfig& config, yolo11::Yolo11Detector* detector);
         ~HttpController() = default;
 
         HttpController(const HttpController&) = delete;
@@ -31,9 +29,11 @@ namespace yolo11_server {
         crow::response handleDetectImage(const crow::request& request);
         crow::response handleDetectImageAsync(const crow::request& request);
         crow::response handleGetAsyncResult(const std::string& task_id) const;
+        crow::response handleGetResultImageByTaskId(const std::string& task_id) const;
         crow::response handleGetResultImage(const std::string& filename) const;
 
         std::string extractImageBytes(const crow::request& request, std::string& error_message) const;
+        bool validateBodySize(const crow::request& request, std::string& error_message) const;
         bool isTrueParam(const char* value) const;
 
         std::string makeTaskId();
@@ -48,9 +48,10 @@ namespace yolo11_server {
 
     private:
         const AppConfig& config_;
-        yolo11::Yolo11Detector& detector_;
+        yolo11::Yolo11Detector* detector_ = nullptr;
         RedisTaskQueue redis_queue_;
         bool redis_mode_ = false;
+        bool sync_enabled_ = false;
 
         mutable std::mutex sync_detector_mutex_;
         mutable std::atomic<unsigned long long> request_counter_{ 0 };

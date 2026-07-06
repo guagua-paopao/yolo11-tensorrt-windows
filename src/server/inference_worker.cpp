@@ -15,6 +15,7 @@
 #include <opencv2/opencv.hpp>
 
 #include "postprocess.h"
+#include "server/image_codec.h"
 
 namespace yolo11_server {
 
@@ -134,12 +135,9 @@ namespace yolo11_server {
         config_.redis.consumer_name = consumer_name;
     }
 
-    InferenceWorker::~InferenceWorker() {
+    InferenceWorker::~InferenceWorker() noexcept {
         stop();
-        if (detector_initialized_) {
-            detector_.release();
-            detector_initialized_ = false;
-        }
+        releaseDetectorNoexcept();
     }
 
     bool InferenceWorker::start() {
@@ -181,14 +179,45 @@ namespace yolo11_server {
         return true;
     }
 
-    void InferenceWorker::stop() {
-        if (!running_.load()) {
+    void InferenceWorker::stop() noexcept {
+        try {
+            running_.store(false);
+
+            if (thread_.joinable()) {
+                // stop() should normally be called by the owner thread. This guard prevents
+                // std::terminate if stop() is accidentally called from inside the worker thread.
+                if (thread_.get_id() == std::this_thread::get_id()) {
+                    thread_.detach();
+                }
+                else {
+                    thread_.join();
+                }
+            }
+        }
+        catch (const std::exception& e) {
+            safeError("InferenceWorker stop exception: " + std::string(e.what()));
+        }
+        catch (...) {
+            safeError("InferenceWorker stop unknown exception.");
+        }
+    }
+
+    void InferenceWorker::releaseDetectorNoexcept() noexcept {
+        if (!detector_initialized_) {
             return;
         }
 
-        running_ = false;
-        if (thread_.joinable()) {
-            thread_.join();
+        try {
+            detector_.release();
+            detector_initialized_ = false;
+        }
+        catch (const std::exception& e) {
+            safeError("Detector release exception: " + std::string(e.what()));
+            detector_initialized_ = false;
+        }
+        catch (...) {
+            safeError("Detector release unknown exception.");
+            detector_initialized_ = false;
         }
     }
 
@@ -252,9 +281,23 @@ namespace yolo11_server {
         }
 
         try {
-            cv::Mat image = cv::imread(task.input_image_path, cv::IMREAD_COLOR);
-            if (image.empty()) {
-                throw std::runtime_error("worker failed to read input image: " + task.input_image_path);
+            cv::Mat image;
+            if (!task.input_image_key.empty()) {
+                std::string input_bytes;
+                std::string get_error;
+                if (!redis_queue_.getBinaryValue(task.input_image_key, input_bytes, get_error)) {
+                    throw std::runtime_error("worker failed to read input image bytes from Redis: " + get_error);
+                }
+                image = ImageCodec::decodeImageBytes(input_bytes);
+                if (image.empty()) {
+                    throw std::runtime_error("worker failed to decode input image bytes from Redis key: " + task.input_image_key);
+                }
+            }
+            else {
+                image = cv::imread(task.input_image_path, cv::IMREAD_COLOR);
+                if (image.empty()) {
+                    throw std::runtime_error("worker failed to read input image: " + task.input_image_path);
+                }
             }
 
             std::vector<Detection> detections;
@@ -269,6 +312,7 @@ namespace yolo11_server {
             auto t1 = std::chrono::steady_clock::now();
             const double infer_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
+            std::string result_image_key = task.result_image_key;
             std::string result_image_filename;
             std::string result_image_path;
             std::string result_image_url;
@@ -277,14 +321,32 @@ namespace yolo11_server {
                 if (result_image.empty()) {
                     throw std::runtime_error("result image is empty after detector.draw");
                 }
+
+                if (!result_image_key.empty()) {
+                    const std::string result_bytes = ImageCodec::encodeJpegBytes(result_image, config_.output.jpeg_quality);
+                    if (result_bytes.empty()) {
+                        throw std::runtime_error("failed to encode result image bytes");
+                    }
+                    std::string set_error;
+                    if (!redis_queue_.setBinaryValue(result_image_key, result_bytes, set_error)) {
+                        throw std::runtime_error("failed to store result image bytes to Redis: " + set_error);
+                    }
+                    result_image_url = "/api/v1/result/" + task.task_id + "/image";
+                }
+
+                // Local output is kept as a debugging/legacy fallback.
                 std::filesystem::create_directories(config_.output.output_dir);
                 result_image_filename = makeResultImageFilename(task.task_id);
                 result_image_path = makeResultImagePath(result_image_filename);
                 std::vector<int> params = { cv::IMWRITE_JPEG_QUALITY, config_.output.jpeg_quality };
                 if (!cv::imwrite(result_image_path, result_image, params)) {
-                    throw std::runtime_error("failed to save result image: " + result_image_path);
+                    result_image_path.clear();
+                    result_image_filename.clear();
                 }
-                result_image_url = "/api/v1/image/" + result_image_filename;
+
+                if (result_image_url.empty() && !result_image_filename.empty()) {
+                    result_image_url = "/api/v1/image/" + result_image_filename;
+                }
             }
 
             const long long finish_time_ms = nowMs();
@@ -313,8 +375,13 @@ namespace yolo11_server {
             body["start_time_ms"] = start_time_ms;
             body["finish_time_ms"] = finish_time_ms;
             body["detections"] = detectionsToJsonForImage(detections, image);
+            if (!result_image_key.empty()) {
+                body["result_image_key"] = result_image_key;
+            }
             if (!result_image_url.empty()) {
-                body["result_image_filename"] = result_image_filename;
+                if (!result_image_filename.empty()) {
+                    body["result_image_filename"] = result_image_filename;
+                }
                 body["result_image_url"] = result_image_url;
             }
 
@@ -324,6 +391,7 @@ namespace yolo11_server {
             if (!redis_queue_.markDone(
                 task.task_id,
                 result_json_text,
+                result_image_key,
                 result_image_path,
                 result_image_filename,
                 finish_time_ms,

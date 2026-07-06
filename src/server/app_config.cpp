@@ -37,8 +37,16 @@ namespace yolo11_server {
         config.server.host = readOrDefault<std::string>(server, "host", config.server.host);
         config.server.port = readOrDefault<int>(server, "port", config.server.port);
         config.server.threads = readOrDefault<int>(server, "threads", config.server.threads);
+        config.server.enable_sync_detect = readOrDefault<bool>(server, "enable_sync_detect", config.server.enable_sync_detect);
+        config.server.max_body_size_mb = readOrDefault<int>(server, "max_body_size_mb", config.server.max_body_size_mb);
         if (config.server.threads <= 0) {
             config.server.threads = 1;
+        }
+        if (config.server.port <= 0 || config.server.port > 65535) {
+            config.server.port = 8080;
+        }
+        if (config.server.max_body_size_mb < 0) {
+            config.server.max_body_size_mb = 0;
         }
 
         auto model = root["model"];
@@ -103,13 +111,13 @@ namespace yolo11_server {
         }
 
         auto worker = root["worker"];
+        config.worker.enabled = readOrDefault<bool>(worker, "enabled", config.worker.enabled);
         config.worker.worker_num = readOrDefault<int>(worker, "worker_num", config.worker.worker_num);
         config.worker.consumer_name_prefix = readOrDefault<std::string>(
             worker,
             "consumer_name_prefix",
             config.worker.consumer_name_prefix
         );
-
         config.worker.log_task_done = readOrDefault<bool>(
             worker,
             "log_task_done",
@@ -119,9 +127,9 @@ namespace yolo11_server {
         if (config.worker.worker_num <= 0) {
             config.worker.worker_num = 1;
         }
-        if (config.worker.worker_num > 8) {
-            std::cerr << "worker.worker_num is too large, clamp to 8." << std::endl;
-            config.worker.worker_num = 8;
+        if (config.worker.worker_num > 16) {
+            std::cerr << "worker.worker_num is too large, clamp to 16." << std::endl;
+            config.worker.worker_num = 16;
         }
         if (config.worker.consumer_name_prefix.empty()) {
             config.worker.consumer_name_prefix = "worker_";
