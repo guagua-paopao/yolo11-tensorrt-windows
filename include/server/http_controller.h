@@ -11,14 +11,19 @@
 #include <crow.h>
 
 #include "server/app_config.h"
+#include "server/redis_task_queue.h"
 #include "yolo11_detector_api.h"
 
 namespace yolo11_server {
 
+    // Phase 4: HttpController only handles the HTTP layer.
+    // 1. The sync API uses the detector created in main_server.
+    // 2. The async API saves input images, submits Redis Stream tasks, and queries Redis results.
+    // 3. Redis consumption and async TensorRT inference are handled by InferenceService/InferenceWorker.
     class HttpController {
     public:
         HttpController(const AppConfig& config, yolo11::Yolo11Detector& detector);
-        ~HttpController();
+        ~HttpController() = default;
 
         HttpController(const HttpController&) = delete;
         HttpController& operator=(const HttpController&) = delete;
@@ -48,45 +53,26 @@ namespace yolo11_server {
         crow::response handleGetAsyncResult(const std::string& task_id) const;
         crow::response handleGetResultImage(const std::string& filename) const;
 
-        std::string extractImageBytes(
-            const crow::request& request,
-            std::string& error_message
-        ) const;
-
+        std::string extractImageBytes(const crow::request& request, std::string& error_message) const;
         bool isTrueParam(const char* value) const;
 
         std::string makeTaskId();
         std::string makeResultImageFilename(unsigned long long request_id) const;
-        std::string makeResultImageFilename(const std::string& task_id) const;
         std::string makeInputImagePath(const std::string& task_id) const;
         std::string makeResultImagePath(const std::string& filename) const;
 
         bool isSafeImageFilename(const std::string& filename) const;
         std::string guessImageContentType(const std::string& filename) const;
 
-        void startWorker();
-        void stopWorker();
-        void workerLoop();
-
-        void pushTask(const AsyncTaskRecord& task);
-        bool popTask(std::string& task_id);
-
         static long long nowMs();
 
     private:
         const AppConfig& config_;
         yolo11::Yolo11Detector& detector_;
+        RedisTaskQueue redis_queue_;
+        bool redis_mode_ = false;
 
-        // Shared Detector access is serialized in http_controller.cpp by a file-scope mutex.
-
-        mutable std::mutex task_mutex_;
-        std::condition_variable task_cv_;
-        std::unordered_map<std::string, AsyncTaskRecord> tasks_;
-        std::queue<std::string> pending_task_ids_;
-
-        std::thread worker_thread_;
-        std::atomic<bool> worker_running_{ false };
-
+        mutable std::mutex sync_detector_mutex_;
         mutable std::atomic<unsigned long long> request_counter_{ 0 };
         std::atomic<unsigned long long> task_counter_{ 0 };
     };

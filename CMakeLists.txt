@@ -92,6 +92,11 @@ find_package(nlohmann_json CONFIG REQUIRED)
 find_package(yaml-cpp CONFIG REQUIRED)
 find_package(Crow CONFIG REQUIRED)
 
+# Redis client: hiredis
+# vcpkg install hiredis:x64-windows
+find_package(hiredis CONFIG REQUIRED)
+set(YOLO11_HIREDIS_TARGET hiredis::hiredis)
+
 # =========================
 # Project paths
 # =========================
@@ -336,14 +341,17 @@ add_dependencies(demo_obb_image myplugins)
 copy_myplugins_to_target(demo_obb_image)
 
 # ============================================================
-# Phase 1: YOLO11 pure C++ HTTP sync image detection server
-# 纯 C++ HTTP 同步图片检测服务
+# Phase 4: YOLO11 pure C++ HTTP server + Redis Stream worker pool
+# 纯 C++ HTTP 服务 + Redis Stream 多 Worker 推理池
 # ============================================================
 add_executable(yolo11_server
     ${PROJECT_SOURCE_DIR}/src/server/main_server.cpp
     ${PROJECT_SOURCE_DIR}/src/server/app_config.cpp
     ${PROJECT_SOURCE_DIR}/src/server/image_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/server/result_serializer.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/redis_task_queue.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/inference_worker.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/inference_service.cpp
     ${PROJECT_SOURCE_DIR}/src/server/http_controller.cpp
 )
 
@@ -351,6 +359,10 @@ target_compile_definitions(yolo11_server PRIVATE
     NOMINMAX
     WIN32_LEAN_AND_MEAN
 )
+
+if(MSVC)
+    target_compile_options(yolo11_server PRIVATE /utf-8)
+endif()
 
 target_include_directories(yolo11_server PRIVATE
     "${PROJECT_INCLUDE_DIR}"
@@ -364,7 +376,13 @@ target_link_libraries(yolo11_server PRIVATE
     nlohmann_json::nlohmann_json
     yaml-cpp::yaml-cpp
     Crow::Crow
+    ${YOLO11_HIREDIS_TARGET}
 )
+
+# hiredis on Windows needs Winsock
+if(WIN32)
+    target_link_libraries(yolo11_server PRIVATE ws2_32)
+endif()
 
 add_dependencies(yolo11_server myplugins)
 copy_myplugins_to_target(yolo11_server)

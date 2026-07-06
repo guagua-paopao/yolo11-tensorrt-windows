@@ -1,8 +1,8 @@
 # YOLO11 TensorRT Windows
 
-Windows-based YOLO11 TensorRT deployment with Visual Studio 2019, CUDA, TensorRT 10, OpenCV, reusable C++ runtime APIs, and a Phase 1.5 pure C++ HTTP detection server.
+Windows-based YOLO11 TensorRT deployment with Visual Studio 2019, CUDA, TensorRT 10, OpenCV, reusable C++ runtime APIs, and a pure C++ HTTP detection server.
 
-This project keeps the original TensorRT command-line demos and adds reusable C++ API wrappers so YOLO11 inference can be called directly from other C++ programs through `cv::Mat`. The current service extension also provides a Crow-based HTTP server for synchronous image detection.
+The current version supports synchronous image detection and Redis Stream based asynchronous image detection. The service can receive an image through HTTP, enqueue an async task into Redis, process it with a local C++ worker thread, and return inference results through a task result endpoint.
 
 ## Current Status
 
@@ -15,11 +15,13 @@ This project keeps the original TensorRT command-line demos and adds reusable C+
 | Detection image demo | Supported |
 | Detection video / camera demo | Supported |
 | OBB image demo | Supported |
-| Pure C++ HTTP detection server | Phase 1.5 supported |
+| Pure C++ HTTP detection server | Supported |
+| Synchronous HTTP image detection | Supported |
+| Redis Stream async image detection | Supported |
 | Result image HTTP access | Supported |
 | `class_name` in HTTP JSON response | Supported for COCO class order |
 | Debug raw model bbox output | Supported with `?debug=true` |
-| Redis async task queue | Planned next |
+| Split server / worker executables | Planned next |
 | OBB / Seg / Pose / Video service APIs | Planned later |
 
 ## Features
@@ -31,16 +33,17 @@ This project keeps the original TensorRT command-line demos and adds reusable C+
 - CUDA preprocessing
 - CPU post-processing and optional GPU post-processing path for detection
 - Custom TensorRT plugin support through `myplugins.dll`
-- Reusable C++ runtime API wrappers
+- Reusable C++ runtime API wrappers:
   - `Yolo11Detector`
   - `Yolo11ObbDetector`
-- Original command-line demos preserved
-- Pure C++ HTTP detection server
-  - `GET /api/v1/health`
-  - `POST /api/v1/detect/image`
-  - `GET /api/v1/image/<filename>`
-- HTTP JSON response with original-image-pixel bbox coordinates
-- Optional debug response with raw model bbox coordinates
+- Original TensorRT command-line demos preserved
+- Pure C++ HTTP detection server based on Crow
+- YAML-based server configuration
+- Synchronous image detection endpoint
+- Redis Stream based asynchronous image detection queue
+- Task status/result storage in Redis
+- Result image saving and HTTP image access
+- JSON bbox coordinates restored to original image pixels
 
 ## Environment
 
@@ -56,6 +59,7 @@ Tested environment:
 | OpenCV | `D:\libs\opencv\build` |
 | vcpkg | `D:\vcpkg` |
 | Python | 3.12 |
+| Redis | Redis 8.2.1 in WSL Ubuntu |
 | GPU | RTX 4080 Laptop GPU |
 | CUDA Architecture | `sm_89` |
 
@@ -74,7 +78,7 @@ PowerShell example:
 $env:PATH="D:\TensorRT-10.16.1.11\lib;D:\GPU13.3\bin;D:\libs\opencv\build\x64\vc16\bin;$env:PATH"
 ```
 
-## Third-Party Dependencies for HTTP Server
+## Dependencies
 
 The HTTP server uses:
 
@@ -82,8 +86,9 @@ The HTTP server uses:
 - nlohmann/json
 - yaml-cpp
 - asio, installed as a Crow dependency
+- hiredis, used by the Redis async task queue
 
-Install them through vcpkg:
+Install through vcpkg:
 
 ```bat
 cd /d D:\vcpkg
@@ -91,6 +96,7 @@ cd /d D:\vcpkg
 .\vcpkg.exe install nlohmann-json:x64-windows --vcpkg-root D:\vcpkg
 .\vcpkg.exe install yaml-cpp:x64-windows --vcpkg-root D:\vcpkg
 .\vcpkg.exe install crow:x64-windows --vcpkg-root D:\vcpkg
+.\vcpkg.exe install hiredis:x64-windows --vcpkg-root D:\vcpkg
 ```
 
 When configuring CMake manually, use the vcpkg toolchain file:
@@ -119,6 +125,7 @@ yolo11-tensorrt-windows
 │   │   ├── app_config.h
 │   │   ├── http_controller.h
 │   │   ├── image_codec.h
+│   │   ├── redis_task_queue.h
 │   │   └── result_serializer.h
 │   ├── config.h
 │   ├── model.h
@@ -135,37 +142,36 @@ yolo11-tensorrt-windows
 │   │   ├── http_controller.cpp
 │   │   ├── image_codec.cpp
 │   │   ├── main_server.cpp
+│   │   ├── redis_task_queue.cpp
 │   │   └── result_serializer.cpp
 │   ├── preprocess.cu
 │   ├── postprocess.cpp
 │   └── ...
 ├── images
-├── engine
-│   └── yolo11n.engine
+├── engine or engines
 ├── output
+├── temp
 ├── gen_wts.py
 ├── yolo11_det.cpp
 ├── yolo11_obb.cpp
-├── CMakeLists.txt
-├── README_EN.md
-└── README_CN.md
+└── CMakeLists.txt
 ```
 
-Generated directories and model files such as `out/`, `build/`, `output/`, `*.engine`, `*.pt`, and `*.wts` should not be committed to Git.
+Generated directories and model files such as `out/`, `build/`, `output/`, `temp/`, `*.engine`, `*.pt`, and `*.wts` should not be committed to Git.
 
 ## Support Matrix
 
-| Task | Original Command-Line Demo | C++ API Wrapper | Demo Program | HTTP Server | Status |
+| Task | Original CLI | C++ API | Demo | HTTP Service | Status |
 |---|---|---|---|---|---|
-| Detection | `yolo11_det.exe` | `Yolo11Detector` | `demo_image.exe`, `demo_video.exe` | `yolo11_server.exe` | Supported |
+| Detection | `yolo11_det.exe` | `Yolo11Detector` | `demo_image.exe`, `demo_video.exe` | Sync + Redis async | Supported |
 | OBB | `yolo11_obb.exe` | `Yolo11ObbDetector` | `demo_obb_image.exe` | Planned | API and CPU demo verified |
-| Classification | Source code available | Planned | Planned | Planned | Not wrapped yet |
-| Segmentation | Source code available | Planned | Planned | Planned | Not wrapped yet |
-| Pose | Source code available | Planned | Planned | Planned | Not wrapped yet |
+| Classification | Source available | Planned | Planned | Planned | Not wrapped yet |
+| Segmentation | Source available | Planned | Planned | Planned | Not wrapped yet |
+| Pose | Source available | Planned | Planned | Planned | Not wrapped yet |
 
 For OBB, CPU post-processing is the recommended validation path. The OBB GPU post-processing path is reserved for further completion and testing.
 
-## Config
+## Configuration
 
 ### Model Config
 
@@ -197,7 +203,7 @@ After modifying `config.h`, rebuild the project and regenerate the TensorRT engi
 
 Do not reuse an old `.engine` file after changing class number, model structure, TensorRT version, CUDA version, or GPU architecture.
 
-### HTTP Server Config
+### Server Config
 
 Server configuration file:
 
@@ -215,17 +221,30 @@ server:
 
 model:
   type: "detect"
-  engine_path: "D:/tensorrtx/yolo11/engine/yolo11n.engine"
+  engine_path: "D:/tensorrtx/yolo11/engines/yolo11n.engine"
   gpu_id: 0
   use_gpu_postprocess: false
 
 output:
   save_result_image: true
+  input_dir: "./temp/input"
   output_dir: "./output"
   jpeg_quality: 90
+
+redis:
+  enabled: true
+  host: "172.19.196.109"
+  port: 6379
+  password: ""
+  db: 0
+  stream_key: "yolo:stream:detect"
+  consumer_group: "yolo11_group"
+  consumer_name: "worker_1"
+  block_ms: 500
+  ttl_seconds: 1800
 ```
 
-Use an absolute engine path when possible. A common mistake is using `./engines/yolo11n.engine` while the actual folder is `./engine/yolo11n.engine`.
+Use an absolute engine path when possible. If Redis runs inside WSL, use the current WSL IP from `hostname -I`.
 
 ## Build
 
@@ -290,20 +309,101 @@ file(GLOB_RECURSE SRCS
 list(FILTER SRCS EXCLUDE REGEX ".*src[/\\\\]server[/\\\\].*")
 ```
 
-Then link HTTP server dependencies only to `yolo11_server`:
+Server dependencies:
 
 ```cmake
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(yaml-cpp CONFIG REQUIRED)
 find_package(Crow CONFIG REQUIRED)
+find_package(hiredis CONFIG REQUIRED)
 
+set(YOLO11_HIREDIS_TARGET hiredis::hiredis)
+```
+
+Link dependencies only to `yolo11_server`:
+
+```cmake
 target_link_libraries(yolo11_server PRIVATE
     yolo11_runtime
     myplugins
     nlohmann_json::nlohmann_json
     yaml-cpp::yaml-cpp
     Crow::Crow
+    ${YOLO11_HIREDIS_TARGET}
 )
+
+if(WIN32)
+    target_link_libraries(yolo11_server PRIVATE ws2_32)
+endif()
+```
+
+On Windows, include WinSock headers before hiredis in `redis_task_queue.cpp`:
+
+```cpp
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
+
+#include <hiredis/hiredis.h>
+```
+
+## Redis Setup
+
+The tested setup uses Redis 8.2.1 in WSL Ubuntu.
+
+Start Redis in WSL:
+
+```bash
+sudo service redis-server start
+redis-cli ping
+ss -lntp | grep 6379
+hostname -I
+```
+
+Expected output:
+
+```text
+PONG
+LISTEN ... 0.0.0.0:6379
+172.19.196.109
+```
+
+Verify from Windows PowerShell:
+
+```powershell
+Test-NetConnection 172.19.196.109 -Port 6379
+```
+
+Redis command-level check from Windows:
+
+```powershell
+$client = New-Object System.Net.Sockets.TcpClient
+$client.Connect("172.19.196.109", 6379)
+$stream = $client.GetStream()
+$bytes = [Text.Encoding]::ASCII.GetBytes("*1`r`n`$4`r`nPING`r`n")
+$stream.Write($bytes, 0, $bytes.Length)
+$buffer = New-Object byte[] 1024
+$n = $stream.Read($buffer, 0, $buffer.Length)
+[Text.Encoding]::ASCII.GetString($buffer, 0, $n)
+$client.Close()
+```
+
+Expected output:
+
+```text
++PONG
+```
+
+If Windows also has a Redis service on `127.0.0.1:6379`, disable it or avoid using `127.0.0.1:6379` in `server.yaml`:
+
+```powershell
+Get-Service | Where-Object { $_.Name -match "redis" -or $_.DisplayName -match "redis" }
+Stop-Service Redis
+Set-Service Redis -StartupType Disabled
 ```
 
 ## Download YOLO11 Models
@@ -426,8 +526,6 @@ The last argument controls post-processing mode:
 | `c` | CPU post-processing |
 | `g` | GPU post-processing |
 
-Results are saved in the executable directory.
-
 ### OBB
 
 Run OBB inference on an image directory:
@@ -522,35 +620,30 @@ Run OBB image demo:
 demo_obb_image.exe yolo11n-obb.engine D:\tensorrtx\yolo11\images\a.jpg a_obb_result.jpg cpu
 ```
 
-The last argument controls OBB demo post-processing mode:
-
-| Argument | Meaning |
-|---|---|
-| `cpu` | CPU OBB post-processing |
-| `gpu` | GPU OBB post-processing path, experimental |
-
 Recommended validation command:
 
 ```bat
 demo_obb_image.exe yolo11n-obb.engine D:\tensorrtx\yolo11\images\a.jpg a_obb_result.jpg cpu
 ```
 
-## Pure C++ HTTP Detection Server
+## HTTP Detection Server
 
 Current server phase:
 
 ```text
-Phase 1.5: synchronous HTTP image detection service
+Phase 2: HTTP detection service with Redis Stream async queue
 ```
 
 Supported endpoints:
 
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/api/v1/health` | Service health and model config |
+| GET | `/api/v1/health` | Service health, model config, Redis status |
 | POST | `/api/v1/detect/image` | Synchronous image detection |
-| POST | `/api/v1/detect/image?debug=true` | Detection with raw model bbox debug fields |
-| GET | `/api/v1/image/<filename>` | Read saved result image |
+| POST | `/api/v1/detect/image?debug=true` | Synchronous detection with raw model bbox debug fields |
+| POST | `/api/v1/detect/image/async` | Submit async image detection task and return `task_id` |
+| GET | `/api/v1/result/{task_id}` | Query queued/running/done/failed status and result JSON |
+| GET | `/api/v1/image/{filename}` | Read saved result image |
 
 ### Build Server Target
 
@@ -566,16 +659,17 @@ cd D:\tensorrtx\yolo11
 .\out\build\x64-Debug\yolo11_server.exe .\config\server.yaml
 ```
 
-If the executable is not found, locate it:
+Or run from the executable directory:
 
 ```powershell
-Get-ChildItem -Recurse -Filter yolo11_server.exe | Select-Object FullName
+cd D:\tensorrtx\yolo11\out\build\x64-Debug
+.\yolo11_server.exe D:\tensorrtx\yolo11\config\server.yaml
 ```
 
 ### Health Check
 
 ```powershell
-curl.exe http://127.0.0.1:8080/api/v1/health
+curl.exe "http://127.0.0.1:8080/api/v1/health"
 ```
 
 Expected response includes:
@@ -584,157 +678,144 @@ Expected response includes:
 {
     "success": true,
     "status": "ok",
-    "service": "yolo11_server",
-    "phase": "phase1_sync_http",
-    "model_type": "detect"
+    "phase": "phase2_redis_stream_queue",
+    "queue_backend": "redis_stream",
+    "async_worker": "running",
+    "redis_enabled": true,
+    "redis_ping": "ok"
 }
 ```
 
-### Image Detection
-
-For PNG:
+### Synchronous Image Detection
 
 ```powershell
 curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image" -H "Content-Type: image/png" --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
 ```
 
-For JPEG:
+### Asynchronous Image Detection
+
+Submit task:
 
 ```powershell
-curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image" -H "Content-Type: image/jpeg" --data-binary "@D:/tensorrtx/yolo11/images/bus.jpg"
+curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image/async" `
+  -H "Content-Type: image/png" `
+  --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
 ```
 
-Response example:
+Expected response:
 
 ```json
 {
     "success": true,
-    "model_type": "detect",
-    "image": {
-        "width": 474,
-        "height": 316,
-        "channels": 3
-    },
-    "bbox_coordinate_system": "original_image_pixels",
-    "bbox_format": "xywh_and_xyxy",
-    "num_detections": 3,
-    "detections": [
-        {
-            "class_id": 0,
-            "class_name": "person",
-            "confidence": 0.9210741519927979,
-            "clipped": false,
-            "bbox": {
-                "x": 140,
-                "y": 68,
-                "w": 63,
-                "h": 204,
-                "x1": 140,
-                "y1": 68,
-                "x2": 203,
-                "y2": 272
-            }
-        }
-    ],
-    "result_image_url": "/api/v1/image/result_xxx.jpg",
-    "result_image_url_full": "http://127.0.0.1:8080/api/v1/image/result_xxx.jpg"
+    "status": "queued",
+    "queue_backend": "redis_stream",
+    "task_id": "20260705_214026_1",
+    "result_url": "/api/v1/result/20260705_214026_1"
 }
 ```
 
-The `bbox` field is returned in original input image pixel coordinates. The JSON bbox is mapped through the same coordinate restoration logic used by the drawing path, so it is consistent with the saved result image.
-
-### Debug Mode
-
-Debug mode returns raw model bbox coordinates before restoration to original image coordinates:
+Query result:
 
 ```powershell
-curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image?debug=true" -H "Content-Type: image/png" --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+curl.exe "http://127.0.0.1:8080/api/v1/result/20260705_214026_1"
 ```
 
-Additional fields:
+Expected final response contains:
 
 ```json
 {
-    "debug": true,
-    "debug_note": "raw_model_bbox is returned only when debug=true or debug=1.",
-    "detections": [
-        {
-            "raw_model_bbox": {
-                "x1": 189.4034423828125,
-                "y1": 198.76870727539063,
-                "x2": 274.6661071777344,
-                "y2": 474.3380432128906
-            }
-        }
-    ]
+    "success": true,
+    "status": "done",
+    "queue_backend": "redis_stream",
+    "num_detections": 3,
+    "result_image_url": "/api/v1/image/20260705_214026_1_result.jpg"
 }
 ```
 
-Use debug mode for backend troubleshooting only. Frontends should use the restored `bbox` field.
-
-### View Result Image
-
-Open the returned URL in a browser:
-
-```text
-http://127.0.0.1:8080/api/v1/image/result_xxx.jpg
-```
-
-Or download it:
+Download result image:
 
 ```powershell
-curl.exe "http://127.0.0.1:8080/api/v1/image/result_xxx.jpg" --output test_result.jpg
-start .\test_result.jpg
+curl.exe "http://127.0.0.1:8080/api/v1/image/20260705_214026_1_result.jpg" -o redis_async_result.jpg
+start .\redis_async_result.jpg
+```
+
+### Batch Async Submission Test
+
+```powershell
+for ($i=1; $i -le 5; $i++) {
+  curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image/async" `
+    -H "Content-Type: image/png" `
+    --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+}
+```
+
+## Redis Data Model
+
+Redis keys used by the async queue:
+
+| Key | Type | Description |
+|---|---|---|
+| `yolo:stream:detect` | Stream | Async detection task queue |
+| `yolo:task:{task_id}:status` | String | `queued`, `running`, `done`, or `failed` |
+| `yolo:task:{task_id}:meta` | Hash | Task input path, timestamps, error, result image path |
+| `yolo:task:{task_id}:result` | String | Final result JSON |
+
+Task state machine:
+
+```text
+queued -> running -> done
+queued -> running -> failed
+```
+
+Inspect Redis:
+
+```bash
+redis-cli -h 172.19.196.109 -p 6379
+KEYS yolo:*
+XRANGE yolo:stream:detect - +
+GET yolo:task:20260705_214026_1:status
+GET yolo:task:20260705_214026_1:result
+HGETALL yolo:task:20260705_214026_1:meta
+XINFO GROUPS yolo:stream:detect
+XINFO CONSUMERS yolo:stream:detect yolo11_group
 ```
 
 ## Minimal Commands
 
-### Detection CLI and API Demo
-
-```bat
-cd /d D:\tensorrtx\yolo11
-
-python gen_wts.py -w weights/yolo11n.pt -o yolo11n.wts -t detect
-copy /Y yolo11n.wts out\build\x64-Debug\
-
-cd /d D:\tensorrtx\yolo11\out\build\x64-Debug
-
-yolo11_det.exe -s yolo11n.wts yolo11n.engine n
-yolo11_det.exe -d yolo11n.engine D:\tensorrtx\yolo11\images c
-
-demo_image.exe yolo11n.engine D:\tensorrtx\yolo11\images\a.jpg det_result.jpg
-```
-
-### HTTP Server
+### HTTP Server with Redis Async Queue
 
 ```powershell
 cd D:\tensorrtx\yolo11
-
 cmake --build out\build\x64-Debug --config Debug --target yolo11_server
 
-.\out\build\x64-Debug\yolo11_server.exe .\config\server.yaml
+cd D:\tensorrtx\yolo11\out\build\x64-Debug
+.\yolo11_server.exe D:\tensorrtx\yolo11\config\server.yaml
+```
 
-curl.exe http://127.0.0.1:8080/api/v1/health
+Health:
 
+```powershell
+curl.exe "http://127.0.0.1:8080/api/v1/health"
+```
+
+Sync detection:
+
+```powershell
 curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image" -H "Content-Type: image/png" --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
 ```
 
-### OBB
+Async detection:
 
-Before building OBB engine, set `kNumClass = 16` in `include/config.h` for the official DOTA OBB model, then rebuild the project.
+```powershell
+curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image/async" `
+  -H "Content-Type: image/png" `
+  --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+```
 
-```bat
-cd /d D:\tensorrtx\yolo11
+Result query:
 
-python gen_wts.py -w weights/yolo11n-obb.pt -o yolo11n-obb.wts -t obb
-copy /Y yolo11n-obb.wts out\build\x64-Debug\
-
-cd /d D:\tensorrtx\yolo11\out\build\x64-Debug
-
-yolo11_obb.exe -s yolo11n-obb.wts yolo11n-obb.engine n
-yolo11_obb.exe -d yolo11n-obb.engine D:\tensorrtx\yolo11\images c
-
-demo_obb_image.exe yolo11n-obb.engine D:\tensorrtx\yolo11\images\a.jpg a_obb_result.jpg cpu
+```powershell
+curl.exe "http://127.0.0.1:8080/api/v1/result/<task_id>"
 ```
 
 ## Troubleshooting
@@ -744,17 +825,17 @@ demo_obb_image.exe yolo11n-obb.engine D:\tensorrtx\yolo11\images\a.jpg a_obb_res
 Check `config/server.yaml`:
 
 ```yaml
-engine_path: "D:/tensorrtx/yolo11/engine/yolo11n.engine"
+engine_path: "D:/tensorrtx/yolo11/engines/yolo11n.engine"
 ```
 
 Make sure the file exists. Do not confuse `engine/` with `engines/`.
 
-### PowerShell cannot run `build\Release\yolo11_server.exe`
+### PowerShell cannot run `yolo11_server.exe`
 
-In PowerShell, run relative executables with `.\`:
+In PowerShell, run relative executables with `./` or `.\`:
 
 ```powershell
-.\out\build\x64-Debug\yolo11_server.exe
+.\out\build\x64-Debug\yolo11_server.exe .\config\server.yaml
 ```
 
 If the path is unknown:
@@ -775,44 +856,66 @@ The engine file does not exist in the current executable directory, or the engin
 dir *.engine
 ```
 
-### `Detected OBB objects: 0`
+### `ERR unknown command 'XGROUP'`
 
-Common causes:
+The server is not connected to a Redis version that supports Redis Streams / consumer groups. On this machine, `127.0.0.1:6379` was occupied by a Windows Redis service, while the intended Redis was WSL Redis 8.2.1 at `172.19.196.109:6379`.
 
-- `kNumClass` is still `80`, but the OBB model expects `16` classes.
-- A detection engine is used with the OBB demo.
-- The test image does not match the OBB model domain.
-- Confidence threshold is too high.
+Check the actual Redis server:
 
-For debugging, lower the threshold in `include/config.h`:
-
-```cpp
-const static float kConfThresh = 0.25f;
+```powershell
+netstat -ano | findstr :6379
+Get-Process -Id <PID>
 ```
 
-Then rebuild and regenerate the engine.
+Check Redis server information:
 
-### `vector subscript out of range` when using `g`
+```bash
+redis-cli -h 172.19.196.109 -p 6379 INFO server
+```
 
-Use CPU post-processing for OBB validation:
+### `failed to connect Redis: timed out` or `connection refused`
+
+Check WSL Redis status:
+
+```bash
+sudo service redis-server status
+redis-cli ping
+ss -lntp | grep 6379
+hostname -I
+```
+
+Check from Windows:
+
+```powershell
+Test-NetConnection 172.19.196.109 -Port 6379
+```
+
+If WSL IP changes, update `config/server.yaml`.
+
+### Windows Redis conflicts with WSL Redis
+
+If Windows Redis is not needed:
+
+```powershell
+Get-CimInstance Win32_Service | Where-Object { $_.Name -match "redis" -or $_.DisplayName -match "redis" }
+Stop-Service Redis
+Set-Service Redis -StartupType Disabled
+```
+
+### hiredis build errors on Windows
+
+Use the vcpkg package name and target below:
 
 ```bat
-yolo11_obb.exe -d yolo11n-obb.engine D:\tensorrtx\yolo11\images c
+.\vcpkg.exe install hiredis:x64-windows --vcpkg-root D:\vcpkg
 ```
 
-### `gen_wts.py` does not accept `-t obb`
-
-Update `gen_wts.py` so the type choices include `obb`:
-
-```python
-choices=['detect', 'cls', 'seg', 'pose', 'obb']
+```cmake
+find_package(hiredis CONFIG REQUIRED)
+target_link_libraries(yolo11_server PRIVATE hiredis::hiredis ws2_32)
 ```
 
-And make sure OBB is included in the YOLO-head branch:
-
-```python
-if m_type in ['detect', 'seg', 'pose', 'obb']:
-```
+Include WinSock headers before `hiredis.h`.
 
 ### JSON bbox is inconsistent with the result image
 
@@ -827,6 +930,7 @@ out/
 build/
 .vs/
 output/
+temp/
 logs/
 *.exe
 *.dll
@@ -841,27 +945,41 @@ logs/
 
 ## Roadmap
 
-Next planned step:
+Current completed phase:
 
 ```text
-Phase 2: Redis async image detection queue
+Phase 2: Redis Stream async image detection queue inside yolo11_server.exe
 ```
 
-Planned endpoints:
+Next planned phase:
 
-| Method | Endpoint | Description |
-|---|---|---|
-| POST | `/api/v1/detect/image/async` | Submit image and return `task_id` |
-| GET | `/api/v1/result/{task_id}` | Query queued/running/done/failed and result JSON |
-| GET | `/api/v1/image/{filename}` | Read result image |
+```text
+Phase 3: split HTTP server and inference worker
+```
+
+Planned architecture:
+
+```text
+yolo11_server.exe
+├── HTTP request handling
+├── image saving
+├── Redis Stream task submission
+└── result query
+
+yolo11_worker.exe
+├── Redis Stream consumer
+├── TensorRT inference
+├── result image saving
+└── Redis result writing
+```
 
 Future extensions:
 
+- Multiple worker processes
+- Multi-GPU scheduling
 - OBB HTTP service
 - Video file async detection
 - RTSP / camera stream service
-- Multi-worker inference pool
-- Multi-GPU scheduling
 - Micro-batching with `inferBatch`
 - Redis + object storage / database productionization
 

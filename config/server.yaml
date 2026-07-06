@@ -14,3 +14,23 @@ output:
   input_dir: "./temp/input"
   output_dir: "./output"
   jpeg_quality: 90
+
+redis:
+  enabled: true
+  host: "172.19.196.109"
+  port: 6379
+  password: ""
+  db: 0
+  stream_key: "yolo:stream:detect"
+  consumer_group: "yolo11_group"
+  # Phase 4 后异步 Worker 会由 worker.consumer_name_prefix 自动生成 consumer 名称。
+  # 这里保留 consumer_name 是为了兼容旧配置和单 Worker 调试。
+  consumer_name: "worker_1"
+  block_ms: 500
+  ttl_seconds: 1800
+
+worker:
+  # 建议先填 1，确认稳定后再改 2。
+  # 每个 worker 都会独立加载一个 TensorRT engine/context/CUDA stream/buffer，占用额外显存。
+  worker_num: 2
+  consumer_name_prefix: "worker_"

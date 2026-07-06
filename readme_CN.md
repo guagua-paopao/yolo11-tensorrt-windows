@@ -1,6 +1,6 @@
 # YOLO11 TensorRT Windows
 
-本项目用于在 Windows 平台部署 YOLO11 TensorRT 推理，支持 Visual Studio 2019、CUDA、TensorRT 10、OpenCV、可复用 C++ Runtime API，以及当前已经跑通的 Phase 1.5 纯 C++ HTTP 图片检测服务。
+本项目用于在 Windows 平台部署 YOLO11 TensorRT 推理，支持 Visual Studio 2019、CUDA、TensorRT 10、OpenCV、可复用 C++ Runtime API、纯 C++ HTTP 图片检测服务，以及当前已经跑通的 Phase 2 Redis Stream 异步图片检测队列。
 
 这个 README 中文版主要用于记录项目演进过程、踩坑原因、修改逻辑和阶段性反思。
 
@@ -9,7 +9,7 @@
 当前项目已经完成：
 
 ```text
-Phase 1.5：纯 C++ HTTP 同步图片检测服务
+Phase 2：纯 C++ HTTP 图片检测服务 + Redis Stream 异步任务队列
 ```
 
 已经验证通过的能力：
@@ -25,6 +25,10 @@ Phase 1.5：纯 C++ HTTP 同步图片检测服务
 - `GET /api/v1/health` 健康检查
 - `POST /api/v1/detect/image` 同步图片检测
 - `GET /api/v1/image/<filename>` 结果图访问
+- `POST /api/v1/detect/image/async` Redis 异步图片检测任务提交
+- `GET /api/v1/result/{task_id}` 异步任务状态与结果查询
+- Redis Stream 任务入队、Worker 消费、结果写回 Redis
+- Redis 中保存 `status`、`meta`、`result` 三类任务信息
 - JSON 返回原图像素坐标 bbox
 - JSON 返回 `class_name`
 - 普通模式不返回调试坐标
@@ -32,14 +36,14 @@ Phase 1.5：纯 C++ HTTP 同步图片检测服务
 
 当前还没有做：
 
-- Redis 异步任务队列
+- Server / Worker 拆分为两个独立可执行程序
 - 多 Worker 推理池
 - OBB HTTP 服务化接口
 - 视频文件异步检测接口
 - RTSP / 摄像头流服务化接口
 - 多 GPU 调度
 
-当前开发原则是：**先稳定 detect 图片服务，再扩展 Redis、异步任务、多线程 Worker、OBB/Seg/Pose/Video。**
+当前开发原则是：**先稳定 detect 图片服务与 Redis 异步队列，再拆分 Server / Worker，最后扩展多 Worker、多 GPU、OBB/Seg/Pose/Video。**
 
 ---
 
@@ -62,6 +66,9 @@ Phase 1.5：纯 C++ HTTP 同步图片检测服务
   - YAML 配置读取
   - JSON 返回检测结果
   - 结果图保存与 HTTP 访问
+  - Redis Stream 异步队列
+  - 本地 Worker 线程消费任务
+  - Redis 保存任务状态、元信息和结果 JSON
 
 ---
 
@@ -77,6 +84,7 @@ Phase 1.5：纯 C++ HTTP 同步图片检测服务
 | OpenCV | `D:\libs\opencv\build` |
 | vcpkg | `D:\vcpkg` |
 | Python | 3.12 |
+| Redis | WSL Ubuntu Redis 8.2.1 |
 | GPU | RTX 4080 Laptop GPU |
 | CUDA 架构 | `sm_89` |
 
@@ -105,6 +113,7 @@ $env:PATH="D:\TensorRT-10.16.1.11\lib;D:\GPU13.3\bin;D:\libs\opencv\build\x64\vc
 - nlohmann/json：JSON 生成
 - yaml-cpp：读取 `config/server.yaml`
 - asio：Crow 依赖，安装 Crow 时会自动处理
+- hiredis：C++ 连接 Redis，支持 Redis Stream 异步任务队列
 
 通过 vcpkg 安装：
 
@@ -114,6 +123,7 @@ cd /d D:\vcpkg
 .\vcpkg.exe install nlohmann-json:x64-windows --vcpkg-root D:\vcpkg
 .\vcpkg.exe install yaml-cpp:x64-windows --vcpkg-root D:\vcpkg
 .\vcpkg.exe install crow:x64-windows --vcpkg-root D:\vcpkg
+.\vcpkg.exe install hiredis:x64-windows --vcpkg-root D:\vcpkg
 ```
 
 如果手动配置 CMake，需要带上 vcpkg toolchain：
@@ -150,6 +160,7 @@ yolo11-tensorrt-windows
 │   │   ├── app_config.h
 │   │   ├── http_controller.h
 │   │   ├── image_codec.h
+│   │   ├── redis_task_queue.h
 │   │   └── result_serializer.h
 │   ├── config.h
 │   ├── model.h
@@ -166,6 +177,7 @@ yolo11-tensorrt-windows
 │   │   ├── http_controller.cpp
 │   │   ├── image_codec.cpp
 │   │   ├── main_server.cpp
+│   │   ├── redis_task_queue.cpp
 │   │   └── result_serializer.cpp
 │   ├── preprocess.cu
 │   ├── postprocess.cpp
@@ -197,7 +209,7 @@ yolo11-tensorrt-windows
 
 | 任务 | 原始命令行程序 | C++ API 封装 | Demo 程序 | HTTP 服务 | 状态 |
 |---|---|---|---|---|---|
-| Detection | `yolo11_det.exe` | `Yolo11Detector` | `demo_image.exe`, `demo_video.exe` | `yolo11_server.exe` | 已支持 |
+| Detection | `yolo11_det.exe` | `Yolo11Detector` | `demo_image.exe`, `demo_video.exe` | 同步 + Redis 异步 | 已支持 |
 | OBB | `yolo11_obb.exe` | `Yolo11ObbDetector` | `demo_obb_image.exe` | 后续计划 | API 和 CPU demo 已验证 |
 | Classification | 源码已有 | 计划封装 | 计划添加 | 后续计划 | 暂未封装 |
 | Segmentation | 源码已有 | 计划封装 | 计划添加 | 后续计划 | 暂未封装 |
@@ -263,8 +275,21 @@ model:
 
 output:
   save_result_image: true
+  input_dir: "./temp/input"
   output_dir: "./output"
   jpeg_quality: 90
+
+redis:
+  enabled: true
+  host: "172.19.196.109"
+  port: 6379
+  password: ""
+  db: 0
+  stream_key: "yolo:stream:detect"
+  consumer_group: "yolo11_group"
+  consumer_name: "worker_1"
+  block_ms: 500
+  ttl_seconds: 1800
 ```
 
 这里建议 `engine_path` 使用绝对路径，避免相对路径混乱。
@@ -361,6 +386,9 @@ list(FILTER SRCS EXCLUDE REGEX ".*src[/\\\\]server[/\\\\].*")
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(yaml-cpp CONFIG REQUIRED)
 find_package(Crow CONFIG REQUIRED)
+find_package(hiredis CONFIG REQUIRED)
+
+set(YOLO11_HIREDIS_TARGET hiredis::hiredis)
 
 target_link_libraries(yolo11_server PRIVATE
     yolo11_runtime
@@ -368,7 +396,12 @@ target_link_libraries(yolo11_server PRIVATE
     nlohmann_json::nlohmann_json
     yaml-cpp::yaml-cpp
     Crow::Crow
+    ${YOLO11_HIREDIS_TARGET}
 )
+
+if(WIN32)
+    target_link_libraries(yolo11_server PRIVATE ws2_32)
+endif()
 ```
 
 这一点是服务化改造的第一个重要经验：**不要破坏原始 demo；新增 server 模块必须和原始命令行 target 隔离。**
@@ -621,7 +654,7 @@ demo_obb_image.exe yolo11n-obb.engine D:\tensorrtx\yolo11\images\a.jpg a_obb_res
 当前服务阶段：
 
 ```text
-Phase 1.5：同步 HTTP 图片检测服务
+Phase 2：同步 HTTP 图片检测服务 + Redis Stream 异步任务队列
 ```
 
 当前支持接口：
@@ -631,6 +664,8 @@ Phase 1.5：同步 HTTP 图片检测服务
 | GET | `/api/v1/health` | 健康检查 |
 | POST | `/api/v1/detect/image` | 同步图片检测 |
 | POST | `/api/v1/detect/image?debug=true` | 同步图片检测，并返回模型原始 bbox |
+| POST | `/api/v1/detect/image/async` | 提交异步图片检测任务，返回 `task_id` |
+| GET | `/api/v1/result/{task_id}` | 查询异步任务状态和检测结果 |
 | GET | `/api/v1/image/<filename>` | 读取保存后的结果图 |
 
 ### 编译 server
@@ -666,8 +701,11 @@ curl.exe http://127.0.0.1:8080/api/v1/health
     "success": true,
     "status": "ok",
     "service": "yolo11_server",
-    "phase": "phase1_sync_http",
-    "model_type": "detect"
+    "phase": "phase2_redis_stream_queue",
+    "model_type": "detect",
+    "queue_backend": "redis_stream",
+    "redis_ping": "ok",
+    "async_worker": "running"
 }
 ```
 
@@ -724,6 +762,47 @@ curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image" -H "Content-Type: i
 
 这里的 `bbox` 是**原始输入图片像素坐标**，不是模型输入坐标，也不是 640×640/letterbox 坐标。
 
+
+### 异步图片检测
+
+提交异步任务：
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image/async" `
+  -H "Content-Type: image/png" `
+  --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+```
+
+正常返回示例：
+
+```json
+{
+    "queue_backend": "redis_stream",
+    "result_url": "/api/v1/result/20260705_214026_1",
+    "status": "queued",
+    "success": true,
+    "task_id": "20260705_214026_1"
+}
+```
+
+查询异步结果：
+
+```powershell
+curl.exe "http://127.0.0.1:8080/api/v1/result/20260705_214026_1"
+```
+
+任务完成后返回中的关键字段：
+
+```json
+{
+    "success": true,
+    "status": "done",
+    "queue_backend": "redis_stream",
+    "num_detections": 3,
+    "result_image_url": "/api/v1/image/20260705_214026_1_result.jpg"
+}
+```
+
 ### Debug 模式
 
 调试请求：
@@ -770,6 +849,227 @@ start .\test_result.jpg
 
 ---
 
+
+## Phase 2 Redis Stream 异步图片检测队列
+
+当前服务阶段已经从：
+
+```text
+Phase 1.5：同步 HTTP 图片检测服务
+```
+
+升级为：
+
+```text
+Phase 2：HTTP 图片检测服务 + Redis Stream 异步任务队列
+```
+
+这一阶段的核心目标不是单纯“能检测”，而是把一次 HTTP 请求变成可排队、可查询、可追踪的任务。
+
+### 当前 Phase 2 架构
+
+目前仍然是一个可执行程序：
+
+```text
+yolo11_server.exe
+├── Crow HTTP Server
+├── Yaml 配置读取
+├── RedisTaskQueue
+├── 本地 Async Worker Thread
+├── Yolo11Detector TensorRT 推理
+├── 结果图保存
+└── Redis 结果写回
+```
+
+也就是说，HTTP Server 和 Worker 目前还在同一个进程中，只是通过 Redis Stream 完成了任务队列化。下一阶段才会拆成独立的 `yolo11_server.exe` 和 `yolo11_worker.exe`。
+
+### 异步检测数据流
+
+```text
+Client 上传图片
+↓
+POST /api/v1/detect/image/async
+↓
+HTTP Server 生成 task_id
+↓
+保存原图到 ./temp/input
+↓
+写入 Redis Stream: yolo:stream:detect
+↓
+Worker 使用 XREADGROUP 消费任务
+↓
+更新状态 queued -> running
+↓
+调用 Yolo11Detector 推理
+↓
+保存结果图到 ./output
+↓
+写入 Redis result/meta/status
+↓
+Client 通过 GET /api/v1/result/{task_id} 查询结果
+```
+
+这一步的意义是：客户端不需要一直阻塞等待推理完成，后端也具备了后续扩展多 Worker、多进程、多机器的基础。
+
+### Phase 2 新增接口
+
+| 方法 | 接口 | 说明 |
+|---|---|---|
+| POST | `/api/v1/detect/image/async` | 上传图片并提交异步检测任务，立即返回 `task_id` |
+| GET | `/api/v1/result/{task_id}` | 查询任务状态和检测结果 |
+| GET | `/api/v1/image/{filename}` | 读取同步或异步生成的结果图 |
+| GET | `/api/v1/health` | 健康检查，新增 Redis 状态字段 |
+
+健康检查中 Redis 正常时应看到：
+
+```json
+{
+    "async_worker": "running",
+    "phase": "phase2_redis_stream_queue",
+    "queue_backend": "redis_stream",
+    "redis_enabled": true,
+    "redis_ping": "ok",
+    "redis_stream_key": "yolo:stream:detect",
+    "success": true
+}
+```
+
+### Redis Key 设计
+
+| Redis Key | 类型 | 作用 |
+|---|---|---|
+| `yolo:stream:detect` | Stream | 异步检测任务队列 |
+| `yolo:task:{task_id}:status` | String | 保存任务状态：`queued` / `running` / `done` / `failed` |
+| `yolo:task:{task_id}:meta` | Hash | 保存任务路径、时间戳、错误信息、结果图路径等元信息 |
+| `yolo:task:{task_id}:result` | String | 保存最终检测 JSON |
+
+任务状态机：
+
+```text
+queued -> running -> done
+queued -> running -> failed
+```
+
+这个状态机是异步服务的核心。后续拆分 Worker、多 Worker 并发、任务失败重试，都要围绕这套状态设计继续扩展。
+
+### Phase 2 运行命令
+
+启动 Redis，当前使用 WSL Ubuntu 中的 Redis 8.2.1：
+
+```bash
+sudo service redis-server start
+redis-cli ping
+ss -lntp | grep 6379
+hostname -I
+```
+
+Windows 侧确认能连到 WSL Redis：
+
+```powershell
+Test-NetConnection 172.19.196.109 -Port 6379
+```
+
+启动服务：
+
+```powershell
+cd D:\tensorrtx\yolo11\out\build\x64-Debug
+.\yolo11_server.exe D:\tensorrtx\yolo11\config\server.yaml
+```
+
+健康检查：
+
+```powershell
+curl.exe "http://127.0.0.1:8080/api/v1/health"
+```
+
+提交异步任务：
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image/async" `
+  -H "Content-Type: image/png" `
+  --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+```
+
+查询任务结果：
+
+```powershell
+curl.exe "http://127.0.0.1:8080/api/v1/result/20260705_214026_1"
+```
+
+下载结果图：
+
+```powershell
+curl.exe "http://127.0.0.1:8080/api/v1/image/20260705_214026_1_result.jpg" -o redis_async_result.jpg
+start .\redis_async_result.jpg
+```
+
+连续提交 5 个异步任务：
+
+```powershell
+for ($i=1; $i -le 5; $i++) {
+  curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image/async" `
+    -H "Content-Type: image/png" `
+    --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+}
+```
+
+### Redis 验收命令
+
+进入 Redis：
+
+```bash
+redis-cli -h 172.19.196.109 -p 6379
+```
+
+查看项目相关 key：
+
+```redis
+KEYS yolo:*
+```
+
+查看 Stream 任务记录：
+
+```redis
+XRANGE yolo:stream:detect - +
+```
+
+查看任务状态：
+
+```redis
+GET yolo:task:20260705_214026_1:status
+```
+
+查看检测结果：
+
+```redis
+GET yolo:task:20260705_214026_1:result
+```
+
+查看任务元信息：
+
+```redis
+HGETALL yolo:task:20260705_214026_1:meta
+```
+
+查看消费组：
+
+```redis
+XINFO GROUPS yolo:stream:detect
+XINFO CONSUMERS yolo:stream:detect yolo11_group
+```
+
+本阶段实际验收结果中，Redis 已经能看到：
+
+```text
+yolo:stream:detect
+yolo:task:20260705_214026_1:status = done
+yolo:task:20260705_214026_1:result = 检测 JSON
+yolo:task:20260705_214026_1:meta = input/result 路径和时间戳
+```
+
+并且 `POST /api/v1/detect/image/async` 可以连续提交多个任务，Worker 能正常消费并完成推理。
+
+---
 ## 关键问题记录与反思
 
 ### 1. 第三方库安装成功后，下一步不是继续装库，而是接入 CMake
@@ -913,6 +1213,139 @@ cv::Rect r = get_rect(img, res[j].bbox);
 
 ---
 
+
+### 8. Redis Stream 不是简单的缓存，而是任务队列
+
+最初对 Redis 的理解容易停留在 key-value 缓存，但这次使用的是 Redis Stream。
+
+这意味着 Redis 不只是存图片或结果，而是在承担“消息队列”的角色：
+
+```text
+XADD 写入任务
+XGROUP 创建消费组
+XREADGROUP 消费任务
+XACK 确认任务处理完成
+```
+
+反思：**Redis Stream 的价值在于任务可排队、可消费、可追踪；它是从同步服务走向异步服务的关键过渡。**
+
+### 9. Windows Redis 和 WSL Redis 同时存在会造成严重混淆
+
+本阶段最典型的问题是 Windows 本机已经有一个 Redis：
+
+```text
+127.0.0.1:6379 -> D:\redis\redis-server.exe
+```
+
+而真正想使用的是 WSL 中的 Redis：
+
+```text
+172.19.196.109:6379 -> /usr/bin/redis-server, Redis 8.2.1
+```
+
+如果 `server.yaml` 写成：
+
+```yaml
+host: "127.0.0.1"
+port: 6379
+```
+
+程序会连到 Windows Redis，而不是 WSL Redis，导致出现：
+
+```text
+ERR unknown command 'XGROUP'
+```
+
+最终通过以下命令确认了两个 Redis 的区别：
+
+```powershell
+netstat -ano | findstr :6379
+Get-Process -Id <PID>
+```
+
+```bash
+redis-cli -h 172.19.196.109 -p 6379 INFO server
+```
+
+反思：**部署时不能只说“Redis 在 6379”，必须明确是哪个操作系统、哪个 IP、哪个进程、哪个版本。**
+
+### 10. hiredis 在 Windows 下需要 WinSock
+
+hiredis 在 Windows 编译时可能出现 `timeval` 未定义等问题，原因是 Windows 网络类型来自 WinSock。
+
+解决方式是在 `redis_task_queue.cpp` 中保证 WinSock 头文件先于 hiredis 引入：
+
+```cpp
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
+
+#include <hiredis/hiredis.h>
+```
+
+同时 CMake 需要链接：
+
+```cmake
+if(WIN32)
+    target_link_libraries(yolo11_server PRIVATE ws2_32)
+endif()
+```
+
+反思：**跨平台库在 Windows 上经常不是“只 include 一个头文件”这么简单，系统网络库也必须正确链接。**
+
+### 11. Redis 超时问题不一定是代码错，也可能是连错服务或服务刚重启
+
+本阶段遇到过：
+
+```text
+failed to connect Redis: timed out
+failed to connect Redis: connection refused
+```
+
+最后排查发现，原因可能包括：
+
+- WSL Redis 没启动
+- WSL IP 改变
+- Windows Redis 占用了 localhost 6379
+- C++ 程序连错 Redis
+- Redis 正在重启
+
+正确排查顺序应该是：
+
+```bash
+redis-cli ping
+hostname -I
+ss -lntp | grep 6379
+```
+
+```powershell
+Test-NetConnection 172.19.196.109 -Port 6379
+```
+
+反思：**网络问题不要一上来改代码，先确认服务、端口、IP、版本和进程。**
+
+### 12. Phase 2 的核心不是“又加了一个接口”，而是服务形态改变了
+
+同步接口：
+
+```text
+Client 等待 HTTP 请求完成
+```
+
+异步接口：
+
+```text
+Client 先拿 task_id，之后查询结果
+```
+
+这意味着系统从“单次调用”开始向“任务系统”转变。后面拆分 Worker、多 GPU、多进程、多机器，本质上都是围绕这个任务系统继续扩展。
+
+反思：**异步队列是服务化部署的分水岭，它让模型推理从函数调用变成可调度任务。**
+
 ## 最小运行命令
 
 ### Detection 命令行和 API demo
@@ -943,6 +1376,12 @@ cmake --build out\build\x64-Debug --config Debug --target yolo11_server
 curl.exe http://127.0.0.1:8080/api/v1/health
 
 curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image" -H "Content-Type: image/png" --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+
+curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image/async" `
+  -H "Content-Type: image/png" `
+  --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+
+curl.exe "http://127.0.0.1:8080/api/v1/result/<task_id>"
 ```
 
 ### OBB
@@ -1046,6 +1485,75 @@ if m_type in ['detect', 'seg', 'pose', 'obb']:
 
 ---
 
+
+### `ERR unknown command 'XGROUP'`
+
+说明当前连接到的 Redis 不支持 Redis Stream 消费组，或者程序连到了错误的 Redis。
+
+本项目中曾经出现过 Windows Redis 和 WSL Redis 同时存在的问题：
+
+```text
+127.0.0.1:6379        -> Windows Redis，D:\redis\redis-server.exe
+172.19.196.109:6379   -> WSL Redis，Redis 8.2.1
+```
+
+排查命令：
+
+```powershell
+netstat -ano | findstr :6379
+Get-Process -Id <PID>
+```
+
+```bash
+redis-cli -h 172.19.196.109 -p 6379 INFO server
+```
+
+### `failed to connect Redis: timed out` 或 `connection refused`
+
+先确认 WSL Redis 是否正常：
+
+```bash
+sudo service redis-server status
+redis-cli ping
+ss -lntp | grep 6379
+hostname -I
+```
+
+再从 Windows 测试：
+
+```powershell
+Test-NetConnection 172.19.196.109 -Port 6379
+```
+
+如果 WSL IP 变了，需要同步修改 `config/server.yaml`。
+
+### Windows 本机 Redis 干扰
+
+如果 Windows 本机 Redis 不需要，可以禁用：
+
+```powershell
+Get-Service | Where-Object { $_.Name -match "redis" -or $_.DisplayName -match "redis" }
+Stop-Service Redis
+Set-Service Redis -StartupType Disabled
+```
+
+### hiredis 在 Windows 下编译问题
+
+hiredis 需要安装：
+
+```bat
+.\vcpkg.exe install hiredis:x64-windows --vcpkg-root D:\vcpkg
+```
+
+CMake 中使用：
+
+```cmake
+find_package(hiredis CONFIG REQUIRED)
+target_link_libraries(yolo11_server PRIVATE hiredis::hiredis ws2_32)
+```
+
+如果出现 `timeval` 未定义，检查 `redis_task_queue.cpp` 中 WinSock 头文件是否在 `hiredis.h` 之前。
+
 ## Git Ignore
 
 以下生成文件不建议上传到 GitHub：
@@ -1055,6 +1563,7 @@ out/
 build/
 .vs/
 output/
+temp/
 logs/
 *.exe
 *.dll
@@ -1070,39 +1579,43 @@ logs/
 
 ## 下一阶段路线
 
+当前已经完成：
+
+```text
+Phase 2：Redis Stream 异步图片检测任务队列
+```
+
 下一步建议进入：
 
 ```text
-Phase 2：Redis 异步图片检测任务队列
+Phase 3：拆分 HTTP Server 和 Inference Worker
 ```
 
-目标接口：
-
-| 方法 | 接口 | 说明 |
-|---|---|---|
-| POST | `/api/v1/detect/image/async` | 上传图片，返回 `task_id` |
-| GET | `/api/v1/result/{task_id}` | 查询 queued/running/done/failed 和检测结果 |
-| GET | `/api/v1/image/{filename}` | 读取结果图 |
-
-目标流程：
+目标架构：
 
 ```text
-Client 上传图片
-↓
-HTTP Server 生成 task_id
-↓
-保存原图 bytes 到 Redis
-↓
-写入 Redis Stream 任务队列
-↓
-Worker 读取任务
-↓
-调用 Yolo11Detector 推理
-↓
-保存 result JSON 和 result image
-↓
-Client 根据 task_id 查询结果
+yolo11_server.exe
+├── 只负责 HTTP 请求
+├── 保存上传图片
+├── 写入 Redis Stream
+└── 查询 Redis 结果
+
+yolo11_worker.exe
+├── 连接 Redis Stream
+├── 消费任务
+├── TensorRT 推理
+├── 保存结果图
+└── 写回 Redis status/result/meta
 ```
+
+Phase 3 做完后，系统就可以进一步扩展：
+
+- 多 worker 进程
+- 多 GPU 调度
+- 单独部署 server 和 worker
+- 后续接对象存储 / 数据库
+- 更接近生产环境的推理服务架构
+
 ---
 
 ## 致谢
