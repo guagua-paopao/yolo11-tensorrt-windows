@@ -37,11 +37,19 @@ namespace yolo11_server {
         int ttl_seconds = 1800;
     };
 
+    // Phase 4: Redis Stream worker pool configuration.
+    // Each worker owns one independent Yolo11Detector instance.
+    struct WorkerSection {
+        int worker_num = 1;
+        std::string consumer_name_prefix = "worker_";
+    };
+
     struct AppConfig {
         ServerSection server;
         ModelSection model;
         OutputSection output;
         RedisSection redis;
+        WorkerSection worker;
 
         static AppConfig loadFromYaml(const std::string& yaml_path);
     };

@@ -341,8 +341,8 @@ add_dependencies(demo_obb_image myplugins)
 copy_myplugins_to_target(demo_obb_image)
 
 # ============================================================
-# Phase 2: YOLO11 pure C++ HTTP server + Redis async queue
-# 纯 C++ HTTP 服务 + Redis 异步任务队列
+# Phase 4: YOLO11 pure C++ HTTP server + Redis Stream worker pool
+# 纯 C++ HTTP 服务 + Redis Stream 多 Worker 推理池
 # ============================================================
 add_executable(yolo11_server
     ${PROJECT_SOURCE_DIR}/src/server/main_server.cpp
@@ -350,6 +350,8 @@ add_executable(yolo11_server
     ${PROJECT_SOURCE_DIR}/src/server/image_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/server/result_serializer.cpp
     ${PROJECT_SOURCE_DIR}/src/server/redis_task_queue.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/inference_worker.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/inference_service.cpp
     ${PROJECT_SOURCE_DIR}/src/server/http_controller.cpp
 )
 
@@ -357,6 +359,10 @@ target_compile_definitions(yolo11_server PRIVATE
     NOMINMAX
     WIN32_LEAN_AND_MEAN
 )
+
+if(MSVC)
+    target_compile_options(yolo11_server PRIVATE /utf-8)
+endif()
 
 target_include_directories(yolo11_server PRIVATE
     "${PROJECT_INCLUDE_DIR}"

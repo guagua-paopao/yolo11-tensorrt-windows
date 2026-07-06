@@ -93,6 +93,26 @@ namespace yolo11_server {
             config.redis.consumer_name = "worker_1";
         }
 
+        auto worker = root["worker"];
+        config.worker.worker_num = readOrDefault<int>(worker, "worker_num", config.worker.worker_num);
+        config.worker.consumer_name_prefix = readOrDefault<std::string>(
+            worker,
+            "consumer_name_prefix",
+            config.worker.consumer_name_prefix
+        );
+        if (config.worker.worker_num <= 0) {
+            config.worker.worker_num = 1;
+        }
+        // Too many TensorRT instances in one process may consume excessive GPU memory.
+        // Increase this soft limit later only after GPU memory testing.
+        if (config.worker.worker_num > 8) {
+            std::cerr << "worker.worker_num is too large, clamp to 8." << std::endl;
+            config.worker.worker_num = 8;
+        }
+        if (config.worker.consumer_name_prefix.empty()) {
+            config.worker.consumer_name_prefix = "worker_";
+        }
+
         return config;
     }
 

@@ -1,6 +1,6 @@
+#include <exception>
 #include <iostream>
 #include <string>
-#include <exception>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -14,6 +14,7 @@
 
 #include "server/app_config.h"
 #include "server/http_controller.h"
+#include "server/inference_service.h"
 #include "yolo11_detector_api.h"
 
 int main(int argc, char** argv) {
@@ -27,8 +28,8 @@ int main(int argc, char** argv) {
 #endif
 
     int exit_code = 0;
-    yolo11::Yolo11Detector detector;
-    bool detector_initialized = false;
+    yolo11::Yolo11Detector sync_detector;
+    bool sync_detector_initialized = false;
 
     try {
         cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_WARNING);
@@ -44,34 +45,44 @@ int main(int argc, char** argv) {
             yolo11_server::AppConfig::loadFromYaml(config_path);
 
         if (app_config.model.type != "detect") {
-            std::cerr << "Phase 2 currently supports model.type = detect only." << std::endl;
+            std::cerr << "Phase 4 currently supports model.type = detect only." << std::endl;
             std::cerr << "Current model.type = " << app_config.model.type << std::endl;
             exit_code = -1;
         }
         else {
-            yolo11::DetectorConfig detector_config;
-            detector_config.engine_path = app_config.model.engine_path;
-            detector_config.gpu_id = app_config.model.gpu_id;
-            detector_config.use_gpu_postprocess = app_config.model.use_gpu_postprocess;
+            // The sync API /api/v1/detect/image uses this detector.
+            // The async API does not share it; every worker initializes its own detector.
+            yolo11::DetectorConfig sync_detector_config;
+            sync_detector_config.engine_path = app_config.model.engine_path;
+            sync_detector_config.gpu_id = app_config.model.gpu_id;
+            sync_detector_config.use_gpu_postprocess = app_config.model.use_gpu_postprocess;
 
-            std::cout << "Loading TensorRT engine: "
-                << detector_config.engine_path << std::endl;
+            std::cout << "Loading sync TensorRT engine: "
+                << sync_detector_config.engine_path << std::endl;
 
-            if (!detector.init(detector_config)) {
-                std::cerr << "Failed to initialize Yolo11Detector." << std::endl;
+            if (!sync_detector.init(sync_detector_config)) {
+                std::cerr << "Failed to initialize sync Yolo11Detector." << std::endl;
                 exit_code = -1;
             }
             else {
-                detector_initialized = true;
+                sync_detector_initialized = true;
 
-                {
+                yolo11_server::InferenceService inference_service(app_config);
+                if (!inference_service.start()) {
+                    std::cerr << "Failed to start InferenceService." << std::endl;
+                    exit_code = -1;
+                }
+                else {
                     crow::SimpleApp app;
-                    yolo11_server::HttpController controller(app_config, detector);
+                    yolo11_server::HttpController controller(app_config, sync_detector);
                     controller.registerRoutes(app);
 
                     std::cout << "YOLO11 server started." << std::endl;
                     std::cout << "Queue backend: "
-                        << (app_config.redis.enabled ? "Redis Stream" : "Local memory")
+                        << (app_config.redis.enabled ? "Redis Stream" : "Disabled")
+                        << std::endl;
+                    std::cout << "Async worker pool size: "
+                        << (app_config.redis.enabled ? inference_service.workerCount() : 0)
                         << std::endl;
 
                     std::cout << "Health API: http://"
@@ -93,6 +104,8 @@ int main(int argc, char** argv) {
                         .port(static_cast<uint16_t>(app_config.server.port))
                         .concurrency(static_cast<unsigned int>(app_config.server.threads))
                         .run();
+
+                    inference_service.stop();
                 }
             }
         }
@@ -108,16 +121,16 @@ int main(int argc, char** argv) {
         exit_code = -1;
     }
 
-    if (detector_initialized) {
+    if (sync_detector_initialized) {
         try {
-            detector.release();
+            sync_detector.release();
         }
         catch (const std::exception& e) {
-            std::cerr << "Warning: detector.release() failed: "
+            std::cerr << "Warning: sync_detector.release() failed: "
                 << e.what() << std::endl;
         }
         catch (...) {
-            std::cerr << "Warning: detector.release() failed with unknown exception." << std::endl;
+            std::cerr << "Warning: sync_detector.release() failed with unknown exception." << std::endl;
         }
     }
 

@@ -8,11 +8,9 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -24,8 +22,6 @@
 namespace yolo11_server {
 
     namespace {
-
-        std::mutex g_detector_mutex;
 
         const std::vector<std::string>& cocoClassNames() {
             static const std::vector<std::string> names = {
@@ -174,7 +170,7 @@ namespace yolo11_server {
                 throw std::runtime_error("failed to connect Redis: " + error);
             }
             redis_mode_ = true;
-            std::cout << "Redis queue enabled: "
+            std::cout << "Redis queue enabled for HTTP producer: "
                 << config_.redis.host << ":" << config_.redis.port
                 << ", stream=" << config_.redis.stream_key
                 << ", group=" << config_.redis.consumer_group
@@ -182,14 +178,8 @@ namespace yolo11_server {
         }
         else {
             redis_mode_ = false;
-            std::cout << "Redis queue disabled. Use local in-memory async queue." << std::endl;
+            std::cout << "Redis queue disabled. Async HTTP API will return 503." << std::endl;
         }
-
-        startWorker();
-    }
-
-    HttpController::~HttpController() {
-        stopWorker();
     }
 
     void HttpController::registerRoutes(crow::SimpleApp& app) {
@@ -229,13 +219,16 @@ namespace yolo11_server {
         body["success"] = true;
         body["status"] = "ok";
         body["service"] = "yolo11_server";
-        body["phase"] = redis_mode_ ? "phase2_redis_stream_queue" : "phase1_5_async_local_queue";
+        body["phase"] = redis_mode_ ? "phase4_redis_stream_worker_pool" : "phase4_sync_only_without_redis";
         body["model_type"] = config_.model.type;
         body["engine_path"] = config_.model.engine_path;
         body["gpu_id"] = config_.model.gpu_id;
         body["use_gpu_postprocess"] = config_.model.use_gpu_postprocess;
-        body["async_worker"] = worker_running_.load() ? "running" : "stopped";
-        body["queue_backend"] = redis_mode_ ? "redis_stream" : "local_memory";
+        body["queue_backend"] = redis_mode_ ? "redis_stream" : "disabled";
+        body["worker_num"] = redis_mode_ ? config_.worker.worker_num : 0;
+        body["worker_note"] = redis_mode_
+            ? "async inference is consumed by InferenceService workers"
+            : "redis.enabled=false, async endpoint is disabled";
 
         if (redis_mode_) {
             std::string redis_error;
@@ -250,10 +243,7 @@ namespace yolo11_server {
             }
         }
         else {
-            std::lock_guard<std::mutex> lock(task_mutex_);
             body["redis_enabled"] = false;
-            body["task_count"] = tasks_.size();
-            body["pending_count"] = pending_task_ids_.size();
         }
 
         return makeJsonResponse(200, body);
@@ -291,7 +281,10 @@ namespace yolo11_server {
 
         auto t0 = std::chrono::steady_clock::now();
         {
-            std::lock_guard<std::mutex> lock(g_detector_mutex);
+            // The sync API still reuses one detector from main_server.
+            // Keep this lock because Crow may call the sync API concurrently.
+            // Async workers do not use this detector or this lock.
+            std::lock_guard<std::mutex> lock(sync_detector_mutex_);
             detections = detector_.infer(image);
             if (draw || config_.output.save_result_image) {
                 result_image = detector_.draw(image, detections);
@@ -355,6 +348,13 @@ namespace yolo11_server {
     }
 
     crow::response HttpController::handleDetectImageAsync(const crow::request& request) {
+        if (!redis_mode_) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error"] = "async inference requires redis.enabled=true in Phase 4";
+            return makeJsonResponse(503, body);
+        }
+
         std::string error_message;
         std::string image_bytes = extractImageBytes(request, error_message);
 
@@ -384,124 +384,79 @@ namespace yolo11_server {
             return makeJsonResponse(500, body);
         }
 
-        const long long create_time_ms = nowMs();
+        RedisTask task;
+        task.task_id = task_id;
+        task.input_image_path = input_path;
+        task.create_time_ms = nowMs();
 
-        if (redis_mode_) {
-            RedisTask task;
-            task.task_id = task_id;
-            task.input_image_path = input_path;
-            task.create_time_ms = create_time_ms;
-
-            std::string redis_error;
-            if (!redis_queue_.submitTask(task, redis_error)) {
-                nlohmann::json body;
-                body["success"] = false;
-                body["error"] = "failed to submit task to Redis";
-                body["redis_error"] = redis_error;
-                return makeJsonResponse(500, body);
-            }
-        }
-        else {
-            AsyncTaskRecord task;
-            task.task_id = task_id;
-            task.status = "queued";
-            task.input_image_path = input_path;
-            task.create_time_ms = create_time_ms;
-            pushTask(task);
+        std::string redis_error;
+        if (!redis_queue_.submitTask(task, redis_error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error"] = "failed to submit task to Redis";
+            body["redis_error"] = redis_error;
+            return makeJsonResponse(500, body);
         }
 
         nlohmann::json body;
         body["success"] = true;
         body["task_id"] = task_id;
         body["status"] = "queued";
-        body["queue_backend"] = redis_mode_ ? "redis_stream" : "local_memory";
+        body["queue_backend"] = "redis_stream";
         body["result_url"] = "/api/v1/result/" + task_id;
 
         return makeJsonResponse(202, body);
     }
 
     crow::response HttpController::handleGetAsyncResult(const std::string& task_id) const {
-        if (redis_mode_) {
-            RedisTaskStatus task_status;
-            std::string redis_error;
-            if (!redis_queue_.getTaskStatus(task_id, task_status, redis_error)) {
-                nlohmann::json body;
-                body["success"] = false;
-                body["error"] = "failed to query Redis task status";
-                body["redis_error"] = redis_error;
-                body["task_id"] = task_id;
-                return makeJsonResponse(500, body);
-            }
-
-            if (!task_status.found) {
-                nlohmann::json body;
-                body["success"] = false;
-                body["error"] = "task not found or expired";
-                body["task_id"] = task_id;
-                return makeJsonResponse(404, body);
-            }
-
-            if (task_status.status == "done" && !task_status.result_json_text.empty()) {
-                crow::response response(200, task_status.result_json_text);
-                response.set_header("Content-Type", "application/json; charset=utf-8");
-                return response;
-            }
-
+        if (!redis_mode_) {
             nlohmann::json body;
-            body["success"] = task_status.status != "failed";
-            body["task_id"] = task_status.task_id;
-            body["status"] = task_status.status;
-            body["queue_backend"] = "redis_stream";
-            body["create_time_ms"] = task_status.create_time_ms;
-            body["start_time_ms"] = task_status.start_time_ms;
-            body["finish_time_ms"] = task_status.finish_time_ms;
-
-            if (!task_status.error.empty()) {
-                body["error"] = task_status.error;
-            }
-            if (!task_status.result_image_filename.empty()) {
-                body["result_image_filename"] = task_status.result_image_filename;
-                body["result_image_url"] = "/api/v1/image/" + task_status.result_image_filename;
-            }
-
-            return makeJsonResponse(200, body);
+            body["success"] = false;
+            body["error"] = "async result query requires redis.enabled=true in Phase 4";
+            body["task_id"] = task_id;
+            return makeJsonResponse(503, body);
         }
 
-        AsyncTaskRecord task;
-        {
-            std::lock_guard<std::mutex> lock(task_mutex_);
-            auto it = tasks_.find(task_id);
-            if (it == tasks_.end()) {
-                nlohmann::json body;
-                body["success"] = false;
-                body["error"] = "task not found or expired";
-                body["task_id"] = task_id;
-                return makeJsonResponse(404, body);
-            }
-            task = it->second;
+        RedisTaskStatus task_status;
+        std::string redis_error;
+        if (!redis_queue_.getTaskStatus(task_id, task_status, redis_error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error"] = "failed to query Redis task status";
+            body["redis_error"] = redis_error;
+            body["task_id"] = task_id;
+            return makeJsonResponse(500, body);
         }
 
-        if (task.status == "done" && !task.result_json_text.empty()) {
-            crow::response response(200, task.result_json_text);
+        if (!task_status.found) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error"] = "task not found or expired";
+            body["task_id"] = task_id;
+            return makeJsonResponse(404, body);
+        }
+
+        if (task_status.status == "done" && !task_status.result_json_text.empty()) {
+            crow::response response(200, task_status.result_json_text);
             response.set_header("Content-Type", "application/json; charset=utf-8");
             return response;
         }
 
         nlohmann::json body;
-        body["success"] = task.status != "failed";
-        body["task_id"] = task.task_id;
-        body["status"] = task.status;
-        body["queue_backend"] = "local_memory";
-        body["create_time_ms"] = task.create_time_ms;
-        body["start_time_ms"] = task.start_time_ms;
-        body["finish_time_ms"] = task.finish_time_ms;
+        body["success"] = task_status.status != "failed";
+        body["task_id"] = task_status.task_id;
+        body["status"] = task_status.status;
+        body["queue_backend"] = "redis_stream";
+        body["create_time_ms"] = task_status.create_time_ms;
+        body["start_time_ms"] = task_status.start_time_ms;
+        body["finish_time_ms"] = task_status.finish_time_ms;
 
-        if (!task.error.empty()) {
-            body["error"] = task.error;
+        if (!task_status.error.empty()) {
+            body["error"] = task_status.error;
         }
-        if (!task.result_image_filename.empty()) {
-            body["result_image_filename"] = task.result_image_filename;
-            body["result_image_url"] = "/api/v1/image/" + task.result_image_filename;
+        if (!task_status.result_image_filename.empty()) {
+            body["result_image_filename"] = task_status.result_image_filename;
+            body["result_image_url"] = "/api/v1/image/" + task_status.result_image_filename;
         }
 
         return makeJsonResponse(200, body);
@@ -600,10 +555,6 @@ namespace yolo11_server {
         return oss.str();
     }
 
-    std::string HttpController::makeResultImageFilename(const std::string& task_id) const {
-        return task_id + "_result.jpg";
-    }
-
     std::string HttpController::makeInputImagePath(const std::string& task_id) const {
         std::filesystem::path input_dir(config_.output.input_dir);
         return (input_dir / (task_id + ".jpg")).string();
@@ -639,283 +590,6 @@ namespace yolo11_server {
             return "image/png";
         }
         return "image/jpeg";
-    }
-
-    void HttpController::startWorker() {
-        if (worker_running_.load()) {
-            return;
-        }
-        worker_running_ = true;
-        worker_thread_ = std::thread([this]() {
-            workerLoop();
-            });
-    }
-
-    void HttpController::stopWorker() {
-        if (!worker_running_.load()) {
-            return;
-        }
-        worker_running_ = false;
-        task_cv_.notify_all();
-        if (worker_thread_.joinable()) {
-            worker_thread_.join();
-        }
-    }
-
-    void HttpController::pushTask(const AsyncTaskRecord& task) {
-        {
-            std::lock_guard<std::mutex> lock(task_mutex_);
-            tasks_[task.task_id] = task;
-            pending_task_ids_.push(task.task_id);
-        }
-        task_cv_.notify_one();
-    }
-
-    bool HttpController::popTask(std::string& task_id) {
-        std::unique_lock<std::mutex> lock(task_mutex_);
-        task_cv_.wait(lock, [this]() {
-            return !worker_running_.load() || !pending_task_ids_.empty();
-            });
-
-        if (!worker_running_.load() && pending_task_ids_.empty()) {
-            return false;
-        }
-
-        task_id = pending_task_ids_.front();
-        pending_task_ids_.pop();
-        return true;
-    }
-
-    void HttpController::workerLoop() {
-        std::cout << "Async inference worker started. backend="
-            << (redis_mode_ ? "redis_stream" : "local_memory") << std::endl;
-
-        while (worker_running_.load()) {
-            if (redis_mode_) {
-                RedisTask task;
-                std::string error;
-                if (!redis_queue_.popTask(task, error)) {
-                    if (!error.empty()) {
-                        std::cerr << "Redis popTask failed: " << error << std::endl;
-                        std::this_thread::sleep_for(std::chrono::milliseconds(300));
-                    }
-                    continue;
-                }
-                processRedisTask(task);
-            }
-            else {
-                std::string task_id;
-                if (!popTask(task_id)) {
-                    break;
-                }
-                processLocalTask(task_id);
-            }
-        }
-
-        std::cout << "Async inference worker stopped." << std::endl;
-    }
-
-    void HttpController::processLocalTask(const std::string& task_id) {
-        AsyncTaskRecord task;
-        {
-            std::lock_guard<std::mutex> lock(task_mutex_);
-            auto it = tasks_.find(task_id);
-            if (it == tasks_.end()) {
-                return;
-            }
-            it->second.status = "running";
-            it->second.start_time_ms = nowMs();
-            task = it->second;
-        }
-
-        try {
-            cv::Mat image = cv::imread(task.input_image_path, cv::IMREAD_COLOR);
-            if (image.empty()) {
-                throw std::runtime_error("worker failed to read input image");
-            }
-
-            std::vector<Detection> detections;
-            cv::Mat result_image;
-            auto t0 = std::chrono::steady_clock::now();
-
-            {
-                std::lock_guard<std::mutex> lock(g_detector_mutex);
-                detections = detector_.infer(image);
-                if (config_.output.save_result_image) {
-                    result_image = detector_.draw(image, detections);
-                }
-            }
-
-            auto t1 = std::chrono::steady_clock::now();
-            const double infer_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-
-            std::string result_image_url;
-            if (config_.output.save_result_image && !result_image.empty()) {
-                std::filesystem::create_directories(config_.output.output_dir);
-                task.result_image_filename = makeResultImageFilename(task.task_id);
-                task.result_image_path = makeResultImagePath(task.result_image_filename);
-                std::vector<int> params = { cv::IMWRITE_JPEG_QUALITY, config_.output.jpeg_quality };
-                if (cv::imwrite(task.result_image_path, result_image, params)) {
-                    result_image_url = "/api/v1/image/" + task.result_image_filename;
-                }
-            }
-
-            nlohmann::json body;
-            body["success"] = true;
-            body["task_id"] = task.task_id;
-            body["status"] = "done";
-            body["queue_backend"] = "local_memory";
-            body["model_type"] = config_.model.type;
-            body["image"] = {
-                {"width", image.cols},
-                {"height", image.rows},
-                {"channels", image.channels()}
-            };
-            body["bbox_coordinate_system"] = "original_image_pixels";
-            body["bbox_format"] = "xywh_and_xyxy";
-            body["num_detections"] = detections.size();
-            body["inference_ms"] = infer_ms;
-            body["detections"] = detectionsToJsonForImage(detections, image, false);
-            if (!result_image_url.empty()) {
-                body["result_image_filename"] = task.result_image_filename;
-                body["result_image_url"] = result_image_url;
-            }
-
-            task.status = "done";
-            task.finish_time_ms = nowMs();
-            task.result_json_text = body.dump(4);
-
-            {
-                std::lock_guard<std::mutex> lock(task_mutex_);
-                tasks_[task.task_id] = task;
-            }
-
-            std::cout << "Task done: " << task.task_id
-                << ", detections=" << detections.size()
-                << ", infer_ms=" << infer_ms
-                << std::endl;
-        }
-        catch (const std::exception& e) {
-            std::lock_guard<std::mutex> lock(task_mutex_);
-            auto it = tasks_.find(task_id);
-            if (it != tasks_.end()) {
-                it->second.status = "failed";
-                it->second.error = e.what();
-                it->second.finish_time_ms = nowMs();
-            }
-            std::cerr << "Task failed: " << task_id << ", error=" << e.what() << std::endl;
-        }
-    }
-
-    void HttpController::processRedisTask(const RedisTask& task) {
-        std::string redis_error;
-        if (!redis_queue_.markRunning(task.task_id, nowMs(), redis_error)) {
-            std::cerr << "Redis markRunning failed: task_id=" << task.task_id
-                << ", error=" << redis_error << std::endl;
-        }
-
-        try {
-            cv::Mat image = cv::imread(task.input_image_path, cv::IMREAD_COLOR);
-            if (image.empty()) {
-                throw std::runtime_error("worker failed to read input image");
-            }
-
-            std::vector<Detection> detections;
-            cv::Mat result_image;
-            auto t0 = std::chrono::steady_clock::now();
-
-            {
-                std::lock_guard<std::mutex> lock(g_detector_mutex);
-                detections = detector_.infer(image);
-                if (config_.output.save_result_image) {
-                    result_image = detector_.draw(image, detections);
-                }
-            }
-
-            auto t1 = std::chrono::steady_clock::now();
-            const double infer_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-
-            std::string result_image_filename;
-            std::string result_image_path;
-            std::string result_image_url;
-
-            if (config_.output.save_result_image && !result_image.empty()) {
-                std::filesystem::create_directories(config_.output.output_dir);
-                result_image_filename = makeResultImageFilename(task.task_id);
-                result_image_path = makeResultImagePath(result_image_filename);
-                std::vector<int> params = { cv::IMWRITE_JPEG_QUALITY, config_.output.jpeg_quality };
-                if (cv::imwrite(result_image_path, result_image, params)) {
-                    result_image_url = "/api/v1/image/" + result_image_filename;
-                }
-                else {
-                    result_image_filename.clear();
-                    result_image_path.clear();
-                }
-            }
-
-            nlohmann::json body;
-            body["success"] = true;
-            body["task_id"] = task.task_id;
-            body["status"] = "done";
-            body["queue_backend"] = "redis_stream";
-            body["model_type"] = config_.model.type;
-            body["image"] = {
-                {"width", image.cols},
-                {"height", image.rows},
-                {"channels", image.channels()}
-            };
-            body["bbox_coordinate_system"] = "original_image_pixels";
-            body["bbox_format"] = "xywh_and_xyxy";
-            body["num_detections"] = detections.size();
-            body["inference_ms"] = infer_ms;
-            body["detections"] = detectionsToJsonForImage(detections, image, false);
-            if (!result_image_url.empty()) {
-                body["result_image_filename"] = result_image_filename;
-                body["result_image_url"] = result_image_url;
-            }
-
-            const long long finish_time_ms = nowMs();
-            const std::string result_json_text = body.dump(4);
-
-            redis_error.clear();
-            if (!redis_queue_.markDone(
-                task.task_id,
-                result_json_text,
-                result_image_path,
-                result_image_filename,
-                finish_time_ms,
-                redis_error)) {
-                std::cerr << "Redis markDone failed: task_id=" << task.task_id
-                    << ", error=" << redis_error << std::endl;
-            }
-
-            redis_error.clear();
-            if (!redis_queue_.ackTask(task.stream_id, redis_error)) {
-                std::cerr << "Redis ackTask failed: stream_id=" << task.stream_id
-                    << ", error=" << redis_error << std::endl;
-            }
-
-            std::cout << "Redis task done: " << task.task_id
-                << ", detections=" << detections.size()
-                << ", infer_ms=" << infer_ms
-                << std::endl;
-        }
-        catch (const std::exception& e) {
-            redis_error.clear();
-            if (!redis_queue_.markFailed(task.task_id, e.what(), nowMs(), redis_error)) {
-                std::cerr << "Redis markFailed failed: task_id=" << task.task_id
-                    << ", error=" << redis_error << std::endl;
-            }
-
-            redis_error.clear();
-            if (!redis_queue_.ackTask(task.stream_id, redis_error)) {
-                std::cerr << "Redis ackTask failed after failed task: stream_id=" << task.stream_id
-                    << ", error=" << redis_error << std::endl;
-            }
-
-            std::cerr << "Redis task failed: " << task.task_id
-                << ", error=" << e.what() << std::endl;
-        }
     }
 
     long long HttpController::nowMs() {
