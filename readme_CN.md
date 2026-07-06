@@ -1,15 +1,15 @@
 # YOLO11 TensorRT Windows
 
-本项目用于在 Windows 平台部署 YOLO11 TensorRT 推理，支持 Visual Studio 2019、CUDA、TensorRT 10、OpenCV、可复用 C++ Runtime API、纯 C++ HTTP 图片检测服务，以及当前已经跑通的 Phase 2 Redis Stream 异步图片检测队列。
+本项目用于在 Windows 平台部署 YOLO11 TensorRT 推理，支持 Visual Studio 2019、CUDA、TensorRT 10、OpenCV、可复用 C++ Runtime API、纯 C++ HTTP 图片检测服务、Redis Stream 异步图片检测队列，以及当前已经跑通的 **Phase 4 Redis Stream 多 Worker 推理池**。
 
-这个 README 中文版主要用于记录项目演进过程、踩坑原因、修改逻辑和阶段性反思。
+这个 README 中文版主要用于记录项目演进过程、踩坑原因、修改逻辑、技术栈知识点和阶段性反思。旧阶段内容保留为历史记录，新阶段内容会继续追加，便于后续回溯学习。
 
-## 当前阶段结论
+## 最新阶段结论（Phase 4）
 
 当前项目已经完成：
 
 ```text
-Phase 2：纯 C++ HTTP 图片检测服务 + Redis Stream 异步任务队列
+Phase 4：纯 C++ HTTP Detection Server + Redis Stream 异步队列 + 多 Worker 推理池
 ```
 
 已经验证通过的能力：
@@ -27,23 +27,30 @@ Phase 2：纯 C++ HTTP 图片检测服务 + Redis Stream 异步任务队列
 - `GET /api/v1/image/<filename>` 结果图访问
 - `POST /api/v1/detect/image/async` Redis 异步图片检测任务提交
 - `GET /api/v1/result/{task_id}` 异步任务状态与结果查询
-- Redis Stream 任务入队、Worker 消费、结果写回 Redis
+- Redis Stream 任务入队、Consumer Group 消费、结果写回 Redis
 - Redis 中保存 `status`、`meta`、`result` 三类任务信息
 - JSON 返回原图像素坐标 bbox
 - JSON 返回 `class_name`
 - 普通模式不返回调试坐标
 - `?debug=true` 时返回 `raw_model_bbox`
+- `InferenceService` 统一管理后台推理池
+- `InferenceWorker` 从 Redis Stream 消费任务并执行 TensorRT 推理
+- `worker_num=2` 时，`worker_1` 与 `worker_2` 均能独立加载 TensorRT engine
+- 每个 Worker 独立持有一个 `Yolo11Detector`，避免多个线程共享 TensorRT context
+- 连续异步任务测试后 `XPENDING=0`，`worker_1/worker_2 pending=0`
+- 服务退出后 GPU 无残留进程，Worker 可以正常停止
 
 当前还没有做：
 
-- Server / Worker 拆分为两个独立可执行程序
-- 多 Worker 推理池
+- 独立的 `yolo11_worker.exe` 多进程部署版本
 - OBB HTTP 服务化接口
 - 视频文件异步检测接口
 - RTSP / 摄像头流服务化接口
 - 多 GPU 调度
+- 自动压测脚本与性能统计面板
+- Redis Stream pending 自动恢复机制
 
-当前开发原则是：**先稳定 detect 图片服务与 Redis 异步队列，再拆分 Server / Worker，最后扩展多 Worker、多 GPU、OBB/Seg/Pose/Video。**
+当前开发原则是：**先把 detect 图片服务、Redis 异步队列和多 Worker 推理池做稳，再做压测、指标统计、异常恢复，最后扩展 OBB/Seg/Pose/Video 和多 GPU。**
 
 ---
 
@@ -67,7 +74,8 @@ Phase 2：纯 C++ HTTP 图片检测服务 + Redis Stream 异步任务队列
   - JSON 返回检测结果
   - 结果图保存与 HTTP 访问
   - Redis Stream 异步队列
-  - 本地 Worker 线程消费任务
+  - InferenceService 管理多 Worker 推理池
+  - 每个 InferenceWorker 独立持有 Yolo11Detector
   - Redis 保存任务状态、元信息和结果 JSON
 
 ---
@@ -160,6 +168,8 @@ yolo11-tensorrt-windows
 │   │   ├── app_config.h
 │   │   ├── http_controller.h
 │   │   ├── image_codec.h
+│   │   ├── inference_service.h
+│   │   ├── inference_worker.h
 │   │   ├── redis_task_queue.h
 │   │   └── result_serializer.h
 │   ├── config.h
@@ -176,6 +186,8 @@ yolo11-tensorrt-windows
 │   │   ├── app_config.cpp
 │   │   ├── http_controller.cpp
 │   │   ├── image_codec.cpp
+│   │   ├── inference_service.cpp
+│   │   ├── inference_worker.cpp
 │   │   ├── main_server.cpp
 │   │   ├── redis_task_queue.cpp
 │   │   └── result_serializer.cpp
@@ -290,9 +302,13 @@ redis:
   consumer_name: "worker_1"
   block_ms: 500
   ttl_seconds: 1800
+
+worker:
+  worker_num: 2
+  consumer_name_prefix: "worker_"
 ```
 
-这里建议 `engine_path` 使用绝对路径，避免相对路径混乱。
+这里建议 `engine_path` 使用绝对路径；`worker_num` 可先设为 1 验证，再改为 2 或更高。，避免相对路径混乱。
 ---
 
 ## 编译方法
@@ -654,7 +670,7 @@ demo_obb_image.exe yolo11n-obb.engine D:\tensorrtx\yolo11\images\a.jpg a_obb_res
 当前服务阶段：
 
 ```text
-Phase 2：同步 HTTP 图片检测服务 + Redis Stream 异步任务队列
+Phase 4：同步 HTTP 图片检测服务 + Redis Stream 异步任务队列 + 多 Worker 推理池
 ```
 
 当前支持接口：
@@ -701,11 +717,12 @@ curl.exe http://127.0.0.1:8080/api/v1/health
     "success": true,
     "status": "ok",
     "service": "yolo11_server",
-    "phase": "phase2_redis_stream_queue",
+    "phase": "phase4_redis_stream_worker_pool",
     "model_type": "detect",
     "queue_backend": "redis_stream",
     "redis_ping": "ok",
-    "async_worker": "running"
+    "worker_num": 2,
+    "async_worker_pool": "running"
 }
 ```
 
@@ -1577,44 +1594,338 @@ logs/
 ```
 ---
 
+
+---
+
+## Phase 4 Redis Stream 多 Worker 推理池
+
+当前服务阶段已经从：
+
+```text
+Phase 2 / Phase 3：Redis Stream 异步任务队列
+```
+
+升级为：
+
+```text
+Phase 4：Redis Stream 多 Worker 推理池
+```
+
+这一阶段的核心不是“再增加一个接口”，而是把异步推理链路从控制器内置 Worker 升级为更清晰的推理服务架构：HTTP 层负责接收请求、保存图片、提交 Redis 任务和查询结果；推理层由 `InferenceService` 统一管理多个 `InferenceWorker`；每个 Worker 独立加载 TensorRT engine，并独立持有一个 `Yolo11Detector`。
+
+### Phase 4 架构变化
+
+```text
+main_server.cpp
+  |
+  |-- AppConfig                         读取 server.yaml
+  |-- Yolo11Detector                    同步接口使用的 Detector
+  |-- InferenceService                  后台推理池管理器
+  |     |-- InferenceWorker 1            consumer=worker_1，独立 Detector
+  |     |-- InferenceWorker 2            consumer=worker_2，独立 Detector
+  |
+  |-- HttpController                    HTTP 路由层
+        |-- GET  /api/v1/health
+        |-- POST /api/v1/detect/image
+        |-- POST /api/v1/detect/image/async
+        |-- GET  /api/v1/result/{task_id}
+        |-- GET  /api/v1/image/{filename}
+```
+
+和 Phase 2 相比，最重要的变化是：
+
+| 模块 | Phase 2 / 3 | Phase 4 |
+|---|---|---|
+| HttpController | 既处理 HTTP，也内置 workerLoop | 只处理 HTTP、任务提交、结果查询 |
+| Worker | 控制器内部线程 | 独立 `InferenceWorker` 类 |
+| Worker 管理 | 分散在 Controller 中 | `InferenceService` 统一启动和停止 |
+| Detector | 同步与异步共用一个 Detector，需要锁 | 每个 Worker 独立持有 Detector |
+| Redis consumer | 单 consumer | `worker_1`、`worker_2` 等多 consumer |
+| 吞吐扩展 | 受单 Detector 串行限制 | 可以通过 `worker_num` 扩展 Worker 数量 |
+
+### Phase 4 新增/修改文件
+
+| 文件 | 类型 | 作用 |
+|---|---|---|
+| `include/server/inference_service.h` | 新增 | 声明 `InferenceService` |
+| `src/server/inference_service.cpp` | 新增 | 实现 Worker 池创建、启动、停止 |
+| `include/server/inference_worker.h` | 新增 | 声明 `InferenceWorker` |
+| `src/server/inference_worker.cpp` | 新增 | 实现 Redis 任务消费、推理、结果写回 |
+| `include/server/app_config.h` | 修改 | 增加 `worker` 配置结构 |
+| `src/server/app_config.cpp` | 修改 | 解析 `worker.worker_num` 和 `consumer_name_prefix` |
+| `include/server/http_controller.h` | 修改 | 移除 Worker 线程相关成员 |
+| `src/server/http_controller.cpp` | 修改 | 异步接口只提交 Redis 任务，结果接口只查询 Redis |
+| `src/server/main_server.cpp` | 修改 | 启动 `InferenceService` |
+| `config/server.yaml` | 修改 | 新增 `worker` 配置段 |
+| `CMakeLists.txt` | 修改 | 加入新增源文件，并为 MSVC 添加 `/utf-8` |
+
+### Phase 4 异步任务数据流
+
+```text
+Client 上传图片
+↓
+POST /api/v1/detect/image/async
+↓
+HttpController 保存输入图片，生成 task_id
+↓
+RedisTaskQueue XADD 到 yolo:stream:detect
+↓
+InferenceWorker 使用 XREADGROUP 从 yolo11_group 领取任务
+↓
+markRunning：queued -> running
+↓
+Worker 读取图片，调用独立 Yolo11Detector 推理
+↓
+保存结果图，生成 result JSON
+↓
+markDone：running -> done，写入 status/result/meta
+↓
+XACK 确认任务已处理
+↓
+Client 通过 GET /api/v1/result/{task_id} 查询结果
+```
+
+### Phase 4 配置项
+
+`config/server.yaml` 新增：
+
+```yaml
+worker:
+  worker_num: 2
+  consumer_name_prefix: "worker_"
+```
+
+含义：
+
+| 配置项 | 说明 |
+|---|---|
+| `worker_num` | 后台推理 Worker 数量。当前已验证 `2`。 |
+| `consumer_name_prefix` | Redis consumer 前缀，例如 `worker_1`、`worker_2`。 |
+
+建议：
+
+- 第一次验证先设为 `1`，确认 Redis、engine、同步/异步接口都正常。
+- 单 Worker 稳定后再设为 `2`。
+- 继续增加 Worker 前必须观察 GPU 显存，因为每个 Worker 都会加载一份 TensorRT engine。
+
+### 为什么每个 Worker 要独立 Detector
+
+TensorRT 推理对象、execution context、CUDA stream 和 GPU buffer 不适合被多个线程直接无保护共享。早期阶段使用一个全局 mutex 串行保护共享 Detector，虽然安全，但本质上不能提升推理吞吐。
+
+Phase 4 采用：
+
+```text
+一个 InferenceWorker  -> 一个 Yolo11Detector -> 一套 TensorRT 推理资源
+```
+
+优点：
+
+- 线程边界清楚。
+- 避免多个线程抢同一个 TensorRT context。
+- Redis consumer 与 Worker 一一对应，日志和结果容易追踪。
+- 后续扩展多 GPU、多进程 Worker 时更自然。
+
+代价：
+
+- 显存占用随 Worker 数量增加。
+- 多 Worker 不一定线性提速，需要通过 Phase 5 压测判断最优 worker_num。
+
+### Phase 4 测试结果
+
+本阶段已经完成 `worker_num=2` 验证。服务启动日志显示：
+
+```text
+Starting InferenceService: worker_num=2, stream=yolo:stream:detect, group=yolo11_group
+Worker 1 loading TensorRT engine: D:/tensorrtx/yolo11/engines/yolo11n.engine, consumer=worker_1
+InferenceWorker started: id=1, consumer=worker_1, backend=redis_stream
+Worker 2 loading TensorRT engine: D:/tensorrtx/yolo11/engines/yolo11n.engine, consumer=worker_2
+InferenceWorker started: id=2, consumer=worker_2, backend=redis_stream
+YOLO11 server started.
+Queue backend: Redis Stream
+Async worker pool size: 2
+```
+
+连续提交异步任务后，两个 Worker 能交替消费：
+
+```text
+Worker 1 task done: task_id=20260706_092056_1, detections=3, consumer=worker_1
+Worker 2 task done: task_id=20260706_092056_2, detections=3, consumer=worker_2
+...
+Worker 2 task done: task_id=20260706_092057_20, detections=3, consumer=worker_2
+```
+
+Redis 验收结果：
+
+```bash
+redis-cli -h 172.19.196.109 -p 6379 XINFO CONSUMERS yolo:stream:detect yolo11_group
+```
+
+结果显示：
+
+```text
+worker_1 pending = 0
+worker_2 pending = 0
+```
+
+```bash
+redis-cli -h 172.19.196.109 -p 6379 XPENDING yolo:stream:detect yolo11_group
+```
+
+结果：
+
+```text
+1) (integer) 0
+2) (nil)
+3) (nil)
+4) (nil)
+```
+
+说明所有已领取任务都被正常 `XACK`，没有 pending 堆积。
+
+```bash
+redis-cli -h 172.19.196.109 -p 6379 XLEN yolo:stream:detect
+```
+
+结果为：
+
+```text
+(integer) 120
+```
+
+这不是错误。`XLEN=120` 说明 Stream 保留了 120 条历史消息；`XACK` 只确认任务完成，不会自动删除历史消息。判断任务是否卡住应优先看 `XPENDING`。
+
+### Phase 4 遇到的问题与解决方案
+
+#### 1. MSVC 编码导致 app_config.h 级联错误
+
+现象：编译时先出现 `C4819`，随后 `app_config.h` 中 `server/model/output/redis/worker` 被识别成未知重写说明符，后续 `std::thread`、`RedisTaskQueue` 也大量报错。
+
+根因：新增 C++ 文件中含中文注释，但 MSVC 当前未按 UTF-8 解析。
+
+解决：
+
+```cmake
+if(MSVC)
+    target_compile_options(yolo11_server PRIVATE /utf-8)
+endif()
+```
+
+同时将新增 C++ 源码中的中文注释改为英文/ASCII，减少 Windows 编码问题。
+
+#### 2. 多线程日志输出粘连
+
+现象：`Worker 1 task done` 和 `Worker 2 task done` 偶尔粘到同一行。
+
+根因：两个 Worker 线程同时写 `std::cout`。
+
+解决：当前不影响功能，Phase 5 可增加线程安全日志函数：
+
+```cpp
+std::mutex g_log_mutex;
+
+void safeLog(const std::string& msg) {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    std::cout << msg << std::endl;
+}
+```
+
+#### 3. XLEN 增长不是任务堆积
+
+`XPENDING=0` 才说明没有未确认任务。`XLEN` 表示 Stream 历史长度，后续可用 `XTRIM` 控制：
+
+```bash
+redis-cli -h 172.19.196.109 -p 6379 XTRIM yolo:stream:detect MAXLEN ~ 1000
+```
+
+### Phase 4 常用测试命令
+
+健康检查：
+
+```bat
+curl.exe http://127.0.0.1:8080/api/v1/health
+```
+
+同步检测：
+
+```bat
+curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image" ^
+  -H "Content-Type: image/png" ^
+  --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+```
+
+异步检测：
+
+```bat
+curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image/async" ^
+  -H "Content-Type: image/png" ^
+  --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+```
+
+查询结果：
+
+```bat
+curl.exe http://127.0.0.1:8080/api/v1/result/你的task_id
+```
+
+连续提交 100 个任务：
+
+```bat
+for /L %i in (1,1,100) do curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image/async" -H "Content-Type: image/png" --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+```
+
+Redis 检查：
+
+```bash
+redis-cli -h 172.19.196.109 -p 6379 XPENDING yolo:stream:detect yolo11_group
+redis-cli -h 172.19.196.109 -p 6379 XINFO CONSUMERS yolo:stream:detect yolo11_group
+redis-cli -h 172.19.196.109 -p 6379 XLEN yolo:stream:detect
+```
+
+### Phase 4 学习总结
+
+- 异步队列不是简单开线程，而是任务提交、任务排队、任务消费、状态更新、结果查询和失败处理的完整链路。
+- Redis Stream 的 `XACK` 和 `XLEN` 含义不同。`XPENDING=0` 才是判断任务是否处理完成的重要依据。
+- 多 Worker 并发推理不能简单共享一个 Detector。更稳妥的方式是一个 Worker 独立持有一个 Detector。
+- 服务化项目要不断拆职责：HTTP Controller 不应该长期承担 Worker 生命周期管理和推理执行逻辑。
+- 编译错误要先看第一处真正的 `error Cxxxx`，后面很多错误可能只是级联现象。
+- Windows/MSVC 项目要重视编码，新增源码最好统一 UTF-8，并在 CMake 中显式添加 `/utf-8`。
+- 阶段跑通后要立刻 commit/tag，方便后续 Phase 5 做压测和稳定性增强时可回退。
+
+
 ## 下一阶段路线
 
 当前已经完成：
 
 ```text
-Phase 2：Redis Stream 异步图片检测任务队列
+Phase 4：Redis Stream 多 Worker 推理池
 ```
 
 下一步建议进入：
 
 ```text
-Phase 3：拆分 HTTP Server 和 Inference Worker
+Phase 5：压测、性能统计、稳定性增强与 Redis Stream 清理策略
 ```
 
-目标架构：
+Phase 5 的核心目标不是继续加新模型类型，而是把当前已经跑通的异步推理服务做得更可观测、更稳定、更接近部署要求。
 
-```text
-yolo11_server.exe
-├── 只负责 HTTP 请求
-├── 保存上传图片
-├── 写入 Redis Stream
-└── 查询 Redis 结果
+建议优先完成：
 
-yolo11_worker.exe
-├── 连接 Redis Stream
-├── 消费任务
-├── TensorRT 推理
-├── 保存结果图
-└── 写回 Redis status/result/meta
-```
+- `tools/benchmark_async.py`：自动提交 N 个异步任务、轮询结果、统计成功率和耗时。
+- 耗时字段：增加 `queue_wait_ms`、`infer_ms`、`total_ms`、`worker_id`、`consumer_name`。
+- Redis Stream 清理：增加 `XTRIM yolo:stream:detect MAXLEN ~ 1000` 或配置化清理策略。
+- 线程安全日志：解决多 Worker 同时 `std::cout` 导致日志粘连的问题。
+- 异常任务测试：空请求体、非图片文件、Redis 断开、图片路径不存在、Worker 中途停止。
+- pending 恢复机制：研究 `XPENDING`、`XCLAIM`、`XAUTOCLAIM`，为 Worker 崩溃后的任务接管做准备。
+- 文档补充：把 Phase 4 架构、测试结果、部署命令和注意事项同步到 README。
 
-Phase 3 做完后，系统就可以进一步扩展：
+Phase 5 完成后，再考虑：
 
-- 多 worker 进程
+- 独立 `yolo11_worker.exe` 多进程版本
+- OBB HTTP 服务化接口
+- 视频文件异步检测
+- RTSP / 摄像头流
 - 多 GPU 调度
-- 单独部署 server 和 worker
-- 后续接对象存储 / 数据库
-- 更接近生产环境的推理服务架构
+- 对象存储 / 数据库 / 生产部署脚本
 
 ---
 
