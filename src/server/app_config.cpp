@@ -70,6 +70,9 @@ namespace yolo11_server {
         config.redis.consumer_name = readOrDefault<std::string>(redis, "consumer_name", config.redis.consumer_name);
         config.redis.block_ms = readOrDefault<int>(redis, "block_ms", config.redis.block_ms);
         config.redis.ttl_seconds = readOrDefault<int>(redis, "ttl_seconds", config.redis.ttl_seconds);
+        config.redis.stream_max_len = readOrDefault<long long>(redis, "stream_max_len", config.redis.stream_max_len);
+        config.redis.enable_pending_reclaim = readOrDefault<bool>(redis, "enable_pending_reclaim", config.redis.enable_pending_reclaim);
+        config.redis.pending_min_idle_ms = readOrDefault<long long>(redis, "pending_min_idle_ms", config.redis.pending_min_idle_ms);
 
         if (config.redis.port <= 0) {
             config.redis.port = 6379;
@@ -82,6 +85,12 @@ namespace yolo11_server {
         }
         if (config.redis.ttl_seconds < 60) {
             config.redis.ttl_seconds = 60;
+        }
+        if (config.redis.stream_max_len < 0) {
+            config.redis.stream_max_len = 0;
+        }
+        if (config.redis.pending_min_idle_ms < 1000) {
+            config.redis.pending_min_idle_ms = 1000;
         }
         if (config.redis.stream_key.empty()) {
             config.redis.stream_key = "yolo:stream:detect";
@@ -100,11 +109,16 @@ namespace yolo11_server {
             "consumer_name_prefix",
             config.worker.consumer_name_prefix
         );
+
+        config.worker.log_task_done = readOrDefault<bool>(
+            worker,
+            "log_task_done",
+            config.worker.log_task_done
+        );
+
         if (config.worker.worker_num <= 0) {
             config.worker.worker_num = 1;
         }
-        // Too many TensorRT instances in one process may consume excessive GPU memory.
-        // Increase this soft limit later only after GPU memory testing.
         if (config.worker.worker_num > 8) {
             std::cerr << "worker.worker_num is too large, clamp to 8." << std::endl;
             config.worker.worker_num = 8;

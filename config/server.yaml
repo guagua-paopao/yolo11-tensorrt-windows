@@ -32,5 +32,7 @@ redis:
 worker:
   # 建议先填 1，确认稳定后再改 2。
   # 每个 worker 都会独立加载一个 TensorRT engine/context/CUDA stream/buffer，占用额外显存。
-  worker_num: 2
+  enabled: true
+  worker_num: 3
   consumer_name_prefix: "worker_"
+  log_task_done: false

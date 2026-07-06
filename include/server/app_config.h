@@ -35,13 +35,20 @@ namespace yolo11_server {
         std::string consumer_name = "worker_1";
         int block_ms = 1000;
         int ttl_seconds = 1800;
+
+        // Phase 5: keep Redis Stream length bounded.
+        // 0 means disabled. Use approximate trimming: XTRIM stream MAXLEN ~ stream_max_len.
+        long long stream_max_len = 10000;
+
+        // Phase 5: reclaim messages that were delivered to a worker but not XACKed.
+        bool enable_pending_reclaim = true;
+        long long pending_min_idle_ms = 60000;
     };
 
-    // Phase 4: Redis Stream worker pool configuration.
-    // Each worker owns one independent Yolo11Detector instance.
     struct WorkerSection {
         int worker_num = 1;
         std::string consumer_name_prefix = "worker_";
+        bool log_task_done = true;
     };
 
     struct AppConfig {

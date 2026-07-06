@@ -241,6 +241,19 @@ namespace yolo11_server {
             if (!redis_error.empty()) {
                 body["redis_error"] = redis_error;
             }
+
+            RedisStreamStats stats;
+            std::string stats_error;
+            if (redis_queue_.getStreamStats(stats, stats_error)) {
+                body["redis_stream_len"] = stats.stream_len;
+                body["redis_pending"] = stats.pending;
+                body["redis_stream_max_len"] = config_.redis.stream_max_len;
+                body["redis_pending_reclaim"] = config_.redis.enable_pending_reclaim;
+                body["redis_pending_min_idle_ms"] = config_.redis.pending_min_idle_ms;
+            }
+            else if (!stats_error.empty()) {
+                body["redis_stats_error"] = stats_error;
+            }
         }
         else {
             body["redis_enabled"] = false;
@@ -377,10 +390,13 @@ namespace yolo11_server {
         const std::string input_path = makeInputImagePath(task_id);
         std::filesystem::create_directories(config_.output.input_dir);
 
-        if (!writeBytesToFile(input_path, image_bytes)) {
+        // Normalize async input as JPEG after successful decode.
+        // This avoids mismatches such as PNG bytes saved with a .jpg suffix.
+        std::vector<int> input_params = { cv::IMWRITE_JPEG_QUALITY, config_.output.jpeg_quality };
+        if (!cv::imwrite(input_path, image, input_params)) {
             nlohmann::json body;
             body["success"] = false;
-            body["error"] = "failed to save input image";
+            body["error"] = "failed to save normalized input image";
             return makeJsonResponse(500, body);
         }
 
@@ -450,6 +466,15 @@ namespace yolo11_server {
         body["create_time_ms"] = task_status.create_time_ms;
         body["start_time_ms"] = task_status.start_time_ms;
         body["finish_time_ms"] = task_status.finish_time_ms;
+        body["queue_wait_ms"] = task_status.queue_wait_ms;
+        body["inference_ms"] = task_status.infer_ms;
+        body["total_ms"] = task_status.total_ms;
+        if (!task_status.worker_id.empty()) {
+            body["worker_id"] = task_status.worker_id;
+        }
+        if (!task_status.consumer_name.empty()) {
+            body["consumer_name"] = task_status.consumer_name;
+        }
 
         if (!task_status.error.empty()) {
             body["error"] = task_status.error;

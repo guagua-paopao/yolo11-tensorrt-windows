@@ -5,6 +5,7 @@
 #include <cctype>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -18,6 +19,18 @@
 namespace yolo11_server {
 
     namespace {
+
+        std::mutex g_log_mutex;
+
+        void safeLog(const std::string& msg) {
+            std::lock_guard<std::mutex> lock(g_log_mutex);
+            std::cout << msg << std::endl;
+        }
+
+        void safeError(const std::string& msg) {
+            std::lock_guard<std::mutex> lock(g_log_mutex);
+            std::cerr << msg << std::endl;
+        }
 
         RedisSection makeWorkerRedisConfig(const RedisSection& base, const std::string& consumer_name) {
             RedisSection config = base;
@@ -135,14 +148,13 @@ namespace yolo11_server {
         }
 
         if (!config_.redis.enabled) {
-            std::cerr << "InferenceWorker requires redis.enabled=true." << std::endl;
+            safeError("InferenceWorker requires redis.enabled=true.");
             return false;
         }
 
         std::string error;
         if (!redis_queue_.connect(error)) {
-            std::cerr << "Worker " << worker_id_ << " failed to connect Redis: "
-                << error << std::endl;
+            safeError("Worker " + std::to_string(worker_id_) + " failed to connect Redis: " + error);
             return false;
         }
 
@@ -151,15 +163,12 @@ namespace yolo11_server {
         detector_config.gpu_id = config_.model.gpu_id;
         detector_config.use_gpu_postprocess = config_.model.use_gpu_postprocess;
 
-        std::cout << "Worker " << worker_id_
-            << " loading TensorRT engine: " << detector_config.engine_path
-            << ", consumer=" << config_.redis.consumer_name
-            << std::endl;
+        safeLog("Worker " + std::to_string(worker_id_) +
+            " loading TensorRT engine: " + detector_config.engine_path +
+            ", consumer=" + config_.redis.consumer_name);
 
-        // Initialize detector sequentially before starting the worker thread.
-        // This avoids races during TensorRT plugin / engine initialization.
         if (!detector_.init(detector_config)) {
-            std::cerr << "Worker " << worker_id_ << " failed to initialize detector." << std::endl;
+            safeError("Worker " + std::to_string(worker_id_) + " failed to initialize detector.");
             return false;
         }
         detector_initialized_ = true;
@@ -192,18 +201,33 @@ namespace yolo11_server {
     }
 
     void InferenceWorker::loop() {
-        std::cout << "InferenceWorker started: id=" << worker_id_
-            << ", consumer=" << config_.redis.consumer_name
-            << ", backend=redis_stream"
-            << std::endl;
+        safeLog("InferenceWorker started: id=" + std::to_string(worker_id_) +
+            ", consumer=" + config_.redis.consumer_name +
+            ", backend=redis_stream");
 
         while (running_.load()) {
             RedisTask task;
             std::string error;
+
+            // Phase 5: recover stale pending messages first, then read new messages.
+            if (redis_queue_.claimPendingTask(task, error)) {
+                safeLog("Worker " + std::to_string(worker_id_) +
+                    " reclaimed pending task: task_id=" + task.task_id +
+                    ", stream_id=" + task.stream_id +
+                    ", consumer=" + config_.redis.consumer_name);
+                processRedisTask(task);
+                continue;
+            }
+            if (!error.empty()) {
+                safeError("Worker " + std::to_string(worker_id_) +
+                    " Redis claimPendingTask failed: " + error);
+            }
+
+            error.clear();
             if (!redis_queue_.popTask(task, error)) {
                 if (!error.empty()) {
-                    std::cerr << "Worker " << worker_id_
-                        << " Redis popTask failed: " << error << std::endl;
+                    safeError("Worker " + std::to_string(worker_id_) +
+                        " Redis popTask failed: " + error);
                     std::this_thread::sleep_for(std::chrono::milliseconds(300));
                 }
                 continue;
@@ -212,17 +236,19 @@ namespace yolo11_server {
             processRedisTask(task);
         }
 
-        std::cout << "InferenceWorker stopped: id=" << worker_id_
-            << ", consumer=" << config_.redis.consumer_name
-            << std::endl;
+        safeLog("InferenceWorker stopped: id=" + std::to_string(worker_id_) +
+            ", consumer=" + config_.redis.consumer_name);
     }
 
     void InferenceWorker::processRedisTask(const RedisTask& task) {
+        const long long start_time_ms = nowMs();
+        const long long queue_wait_ms = task.create_time_ms > 0 ? std::max(0LL, start_time_ms - task.create_time_ms) : 0LL;
+
         std::string redis_error;
-        if (!redis_queue_.markRunning(task.task_id, nowMs(), redis_error)) {
-            std::cerr << "Worker " << worker_id_
-                << " Redis markRunning failed: task_id=" << task.task_id
-                << ", error=" << redis_error << std::endl;
+        if (!redis_queue_.markRunning(task.task_id, start_time_ms, worker_id_, config_.redis.consumer_name, redis_error)) {
+            safeError("Worker " + std::to_string(worker_id_) +
+                " Redis markRunning failed: task_id=" + task.task_id +
+                ", error=" + redis_error);
         }
 
         try {
@@ -235,8 +261,6 @@ namespace yolo11_server {
             cv::Mat result_image;
             auto t0 = std::chrono::steady_clock::now();
 
-            // Phase 4: no global detector mutex is used here.
-            // This worker owns its detector/context/stream/buffer.
             detections = detector_.infer(image);
             if (config_.output.save_result_image) {
                 result_image = detector_.draw(image, detections);
@@ -249,19 +273,22 @@ namespace yolo11_server {
             std::string result_image_path;
             std::string result_image_url;
 
-            if (config_.output.save_result_image && !result_image.empty()) {
+            if (config_.output.save_result_image) {
+                if (result_image.empty()) {
+                    throw std::runtime_error("result image is empty after detector.draw");
+                }
                 std::filesystem::create_directories(config_.output.output_dir);
                 result_image_filename = makeResultImageFilename(task.task_id);
                 result_image_path = makeResultImagePath(result_image_filename);
                 std::vector<int> params = { cv::IMWRITE_JPEG_QUALITY, config_.output.jpeg_quality };
-                if (cv::imwrite(result_image_path, result_image, params)) {
-                    result_image_url = "/api/v1/image/" + result_image_filename;
+                if (!cv::imwrite(result_image_path, result_image, params)) {
+                    throw std::runtime_error("failed to save result image: " + result_image_path);
                 }
-                else {
-                    result_image_filename.clear();
-                    result_image_path.clear();
-                }
+                result_image_url = "/api/v1/image/" + result_image_filename;
             }
+
+            const long long finish_time_ms = nowMs();
+            const long long total_ms = task.create_time_ms > 0 ? std::max(0LL, finish_time_ms - task.create_time_ms) : 0LL;
 
             nlohmann::json body;
             body["success"] = true;
@@ -279,14 +306,18 @@ namespace yolo11_server {
             body["bbox_coordinate_system"] = "original_image_pixels";
             body["bbox_format"] = "xywh_and_xyxy";
             body["num_detections"] = detections.size();
+            body["queue_wait_ms"] = queue_wait_ms;
             body["inference_ms"] = infer_ms;
+            body["total_ms"] = total_ms;
+            body["create_time_ms"] = task.create_time_ms;
+            body["start_time_ms"] = start_time_ms;
+            body["finish_time_ms"] = finish_time_ms;
             body["detections"] = detectionsToJsonForImage(detections, image);
             if (!result_image_url.empty()) {
                 body["result_image_filename"] = result_image_filename;
                 body["result_image_url"] = result_image_url;
             }
 
-            const long long finish_time_ms = nowMs();
             const std::string result_json_text = body.dump(4);
 
             redis_error.clear();
@@ -296,44 +327,67 @@ namespace yolo11_server {
                 result_image_path,
                 result_image_filename,
                 finish_time_ms,
+                queue_wait_ms,
+                infer_ms,
+                total_ms,
+                worker_id_,
+                config_.redis.consumer_name,
                 redis_error)) {
-                std::cerr << "Worker " << worker_id_
-                    << " Redis markDone failed: task_id=" << task.task_id
-                    << ", error=" << redis_error << std::endl;
+                safeError("Worker " + std::to_string(worker_id_) +
+                    " Redis markDone failed: task_id=" + task.task_id +
+                    ", error=" + redis_error);
             }
 
             redis_error.clear();
             if (!redis_queue_.ackTask(task.stream_id, redis_error)) {
-                std::cerr << "Worker " << worker_id_
-                    << " Redis ackTask failed: stream_id=" << task.stream_id
-                    << ", error=" << redis_error << std::endl;
+                safeError("Worker " + std::to_string(worker_id_) +
+                    " Redis ackTask failed: stream_id=" + task.stream_id +
+                    ", error=" + redis_error);
             }
 
-            std::cout << "Worker " << worker_id_
-                << " task done: task_id=" << task.task_id
-                << ", detections=" << detections.size()
-                << ", infer_ms=" << infer_ms
-                << ", consumer=" << config_.redis.consumer_name
-                << std::endl;
+            if (config_.worker.log_task_done) {
+                std::ostringstream oss;
+                oss << "Worker " << worker_id_
+                    << " task done: task_id=" << task.task_id
+                    << ", detections=" << detections.size()
+                    << ", queue_wait_ms=" << queue_wait_ms
+                    << ", infer_ms=" << infer_ms
+                    << ", total_ms=" << total_ms
+                    << ", consumer=" << config_.redis.consumer_name;
+
+                safeLog(oss.str());
+            }
         }
         catch (const std::exception& e) {
+            const long long finish_time_ms = nowMs();
+            const long long total_ms = task.create_time_ms > 0 ? std::max(0LL, finish_time_ms - task.create_time_ms) : 0LL;
+
             redis_error.clear();
-            if (!redis_queue_.markFailed(task.task_id, e.what(), nowMs(), redis_error)) {
-                std::cerr << "Worker " << worker_id_
-                    << " Redis markFailed failed: task_id=" << task.task_id
-                    << ", error=" << redis_error << std::endl;
+            if (!redis_queue_.markFailed(
+                task.task_id,
+                e.what(),
+                finish_time_ms,
+                queue_wait_ms,
+                total_ms,
+                worker_id_,
+                config_.redis.consumer_name,
+                redis_error)) {
+                safeError("Worker " + std::to_string(worker_id_) +
+                    " Redis markFailed failed: task_id=" + task.task_id +
+                    ", error=" + redis_error);
             }
 
             redis_error.clear();
             if (!redis_queue_.ackTask(task.stream_id, redis_error)) {
-                std::cerr << "Worker " << worker_id_
-                    << " Redis ackTask failed after failed task: stream_id=" << task.stream_id
-                    << ", error=" << redis_error << std::endl;
+                safeError("Worker " + std::to_string(worker_id_) +
+                    " Redis ackTask failed after failed task: stream_id=" + task.stream_id +
+                    ", error=" + redis_error);
             }
 
-            std::cerr << "Worker " << worker_id_
-                << " task failed: task_id=" << task.task_id
-                << ", error=" << e.what() << std::endl;
+            safeError("Worker " + std::to_string(worker_id_) +
+                " task failed: task_id=" + task.task_id +
+                ", total_ms=" + std::to_string(total_ms) +
+                ", error=" + e.what());
         }
     }
 

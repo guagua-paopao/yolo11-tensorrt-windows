@@ -74,6 +74,9 @@ int main(int argc, char** argv) {
                 }
                 else {
                     crow::SimpleApp app;
+
+                    app.loglevel(crow::LogLevel::Warning);
+
                     yolo11_server::HttpController controller(app_config, sync_detector);
                     controller.registerRoutes(app);
 

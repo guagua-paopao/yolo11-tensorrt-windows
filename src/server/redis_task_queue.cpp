@@ -55,19 +55,22 @@ namespace yolo11_server {
         }
 
         std::string contextError(const redisContext* context, const std::string& fallback) {
-            if (context != nullptr && context->err != 0 && context->errstr != nullptr && context->errstr[0] != '\0') {
+            if (context != nullptr && context->errstr != nullptr && std::strlen(context->errstr) > 0) {
                 return context->errstr;
             }
             return fallback;
         }
 
-        bool replyIsError(const redisReply* reply, std::string& error, const redisContext* context = nullptr) {
+        bool replyIsError(const redisReply* reply, std::string& error, const redisContext* context) {
             if (reply == nullptr) {
                 error = contextError(context, "empty redis reply");
                 return true;
             }
             if (reply->type == REDIS_REPLY_ERROR) {
                 error = replyString(reply);
+                if (error.empty()) {
+                    error = "redis command error";
+                }
                 return true;
             }
             return false;
@@ -83,6 +86,18 @@ namespace yolo11_server {
             }
             try {
                 return std::stoll(value);
+            }
+            catch (...) {
+                return default_value;
+            }
+        }
+
+        double parseDouble(const std::string& value, double default_value = 0.0) {
+            if (value.empty()) {
+                return default_value;
+            }
+            try {
+                return std::stod(value);
             }
             catch (...) {
                 return default_value;
@@ -232,6 +247,39 @@ namespace yolo11_server {
             return !replyIsError(reply.get(), error, context);
         }
 
+        bool fillTaskFromStreamEntry(redisReply* entry_reply, RedisTask& task, std::string& error) {
+            task = RedisTask{};
+
+            if (entry_reply == nullptr || entry_reply->type != REDIS_REPLY_ARRAY || entry_reply->elements < 2) {
+                error = "invalid redis stream entry reply";
+                return false;
+            }
+
+            task.stream_id = replyString(entry_reply->element[0]);
+
+            redisReply* fields_reply = entry_reply->element[1];
+            if (fields_reply == nullptr || fields_reply->type != REDIS_REPLY_ARRAY) {
+                error = "invalid redis stream fields reply";
+                return false;
+            }
+
+            std::map<std::string, std::string> fields;
+            for (size_t i = 0; i + 1 < fields_reply->elements; i += 2) {
+                fields[replyString(fields_reply->element[i])] = replyString(fields_reply->element[i + 1]);
+            }
+
+            task.task_id = fields["task_id"];
+            task.input_image_path = fields["input_image_path"];
+            task.create_time_ms = parseLongLong(fields["create_time_ms"]);
+
+            if (task.stream_id.empty() || task.task_id.empty() || task.input_image_path.empty()) {
+                error = "invalid redis stream message: missing stream_id/task_id/input_image_path";
+                return false;
+            }
+
+            return true;
+        }
+
     }  // namespace
 
     RedisTaskQueue::RedisTaskQueue(const RedisSection& config)
@@ -288,13 +336,18 @@ namespace yolo11_server {
         RedisReplyPtr meta_reply(static_cast<redisReply*>(
             redisCommand(
                 context.get(),
-                "HSET %s task_id %s input_image_path %s create_time_ms %lld start_time_ms %lld finish_time_ms %lld error %s result_image_path %s result_image_filename %s",
+                "HSET %s task_id %s input_image_path %s create_time_ms %lld start_time_ms %lld finish_time_ms %lld queue_wait_ms %lld infer_ms %s total_ms %lld worker_id %s consumer_name %s error %s result_image_path %s result_image_filename %s",
                 meta_key.c_str(),
                 task.task_id.c_str(),
                 task.input_image_path.c_str(),
                 task.create_time_ms,
                 0LL,
                 0LL,
+                0LL,
+                "0",
+                0LL,
+                empty,
+                empty,
                 empty,
                 empty,
                 empty
@@ -322,10 +375,26 @@ namespace yolo11_server {
             return false;
         }
 
+        if (config_.stream_max_len > 0) {
+            RedisReplyPtr trim_reply(static_cast<redisReply*>(
+                redisCommand(context.get(), "XTRIM %s MAXLEN ~ %lld", config_.stream_key.c_str(), config_.stream_max_len)
+                ));
+            if (replyIsError(trim_reply.get(), error, context.get())) {
+                error = "XTRIM failed: " + error;
+                return false;
+            }
+        }
+
         return true;
     }
 
-    bool RedisTaskQueue::markRunning(const std::string& task_id, long long start_time_ms, std::string& error) const {
+    bool RedisTaskQueue::markRunning(
+        const std::string& task_id,
+        long long start_time_ms,
+        int worker_id,
+        const std::string& consumer_name,
+        std::string& error
+    ) const {
         RedisContextPtr context;
         if (!connectContext(config_, context, error, 10000)) {
             return false;
@@ -342,7 +411,14 @@ namespace yolo11_server {
         }
 
         RedisReplyPtr meta_reply(static_cast<redisReply*>(
-            redisCommand(context.get(), "HSET %s start_time_ms %lld", meta_key.c_str(), start_time_ms)
+            redisCommand(
+                context.get(),
+                "HSET %s start_time_ms %lld worker_id %d consumer_name %s",
+                meta_key.c_str(),
+                start_time_ms,
+                worker_id,
+                consumer_name.c_str()
+            )
             ));
         if (replyIsError(meta_reply.get(), error, context.get())) {
             return false;
@@ -357,6 +433,11 @@ namespace yolo11_server {
         const std::string& result_image_path,
         const std::string& result_image_filename,
         long long finish_time_ms,
+        long long queue_wait_ms,
+        double infer_ms,
+        long long total_ms,
+        int worker_id,
+        const std::string& consumer_name,
         std::string& error
     ) const {
         RedisContextPtr context;
@@ -379,11 +460,16 @@ namespace yolo11_server {
         RedisReplyPtr meta_reply(static_cast<redisReply*>(
             redisCommand(
                 context.get(),
-                "HSET %s finish_time_ms %lld result_image_path %s result_image_filename %s error %s",
+                "HSET %s finish_time_ms %lld result_image_path %s result_image_filename %s queue_wait_ms %lld infer_ms %.6f total_ms %lld worker_id %d consumer_name %s error %s",
                 meta_key.c_str(),
                 finish_time_ms,
                 result_image_path.c_str(),
                 result_image_filename.c_str(),
+                queue_wait_ms,
+                infer_ms,
+                total_ms,
+                worker_id,
+                consumer_name.c_str(),
                 empty
             )
             ));
@@ -409,6 +495,10 @@ namespace yolo11_server {
         const std::string& task_id,
         const std::string& error_message,
         long long finish_time_ms,
+        long long queue_wait_ms,
+        long long total_ms,
+        int worker_id,
+        const std::string& consumer_name,
         std::string& error
     ) const {
         RedisContextPtr context;
@@ -422,9 +512,13 @@ namespace yolo11_server {
         RedisReplyPtr meta_reply(static_cast<redisReply*>(
             redisCommand(
                 context.get(),
-                "HSET %s finish_time_ms %lld error %s",
+                "HSET %s finish_time_ms %lld queue_wait_ms %lld total_ms %lld worker_id %d consumer_name %s error %s",
                 meta_key.c_str(),
                 finish_time_ms,
+                queue_wait_ms,
+                total_ms,
+                worker_id,
+                consumer_name.c_str(),
                 error_message.c_str()
             )
             ));
@@ -485,9 +579,14 @@ namespace yolo11_server {
             status.error = getValue("error");
             status.result_image_path = getValue("result_image_path");
             status.result_image_filename = getValue("result_image_filename");
+            status.worker_id = getValue("worker_id");
+            status.consumer_name = getValue("consumer_name");
             status.create_time_ms = parseLongLong(getValue("create_time_ms"));
             status.start_time_ms = parseLongLong(getValue("start_time_ms"));
             status.finish_time_ms = parseLongLong(getValue("finish_time_ms"));
+            status.queue_wait_ms = parseLongLong(getValue("queue_wait_ms"));
+            status.infer_ms = parseDouble(getValue("infer_ms"));
+            status.total_ms = parseLongLong(getValue("total_ms"));
         }
 
         if (status.status == "done") {
@@ -564,35 +663,61 @@ namespace yolo11_server {
             return false;
         }
 
-        redisReply* entry_reply = entries_reply->element[0];
-        if (entry_reply == nullptr || entry_reply->type != REDIS_REPLY_ARRAY || entry_reply->elements < 2) {
-            error = "invalid redis stream entry reply";
+        return fillTaskFromStreamEntry(entries_reply->element[0], task, error);
+    }
+
+    bool RedisTaskQueue::claimPendingTask(RedisTask& task, std::string& error) const {
+        task = RedisTask{};
+        error.clear();
+
+        if (!config_.enable_pending_reclaim) {
             return false;
         }
 
-        task.stream_id = replyString(entry_reply->element[0]);
-
-        redisReply* fields_reply = entry_reply->element[1];
-        if (fields_reply == nullptr || fields_reply->type != REDIS_REPLY_ARRAY) {
-            error = "invalid redis stream fields reply";
+        RedisContextPtr context;
+        if (!connectContext(config_, context, error, 10000)) {
             return false;
         }
 
-        std::map<std::string, std::string> fields;
-        for (size_t i = 0; i + 1 < fields_reply->elements; i += 2) {
-            fields[replyString(fields_reply->element[i])] = replyString(fields_reply->element[i + 1]);
-        }
+        RedisReplyPtr reply(static_cast<redisReply*>(
+            redisCommand(
+                context.get(),
+                "XAUTOCLAIM %s %s %s %lld 0-0 COUNT 1",
+                config_.stream_key.c_str(),
+                config_.consumer_group.c_str(),
+                config_.consumer_name.c_str(),
+                config_.pending_min_idle_ms
+            )
+            ));
 
-        task.task_id = fields["task_id"];
-        task.input_image_path = fields["input_image_path"];
-        task.create_time_ms = parseLongLong(fields["create_time_ms"]);
-
-        if (task.stream_id.empty() || task.task_id.empty() || task.input_image_path.empty()) {
-            error = "invalid redis stream message: missing stream_id/task_id/input_image_path";
+        if (reply == nullptr) {
+            error = contextError(context.get(), "empty redis reply when XAUTOCLAIM");
             return false;
         }
 
-        return true;
+        if (reply->type == REDIS_REPLY_ERROR) {
+            error = replyString(reply.get());
+            if (containsText(error, "NOGROUP")) {
+                std::string group_error;
+                if (ensureConsumerGroup(context.get(), config_, group_error)) {
+                    error.clear();
+                }
+            }
+            return false;
+        }
+
+        if (reply->type != REDIS_REPLY_ARRAY || reply->elements < 2) {
+            error = "invalid XAUTOCLAIM reply";
+            return false;
+        }
+
+        redisReply* entries_reply = reply->element[1];
+        if (entries_reply == nullptr || entries_reply->type != REDIS_REPLY_ARRAY || entries_reply->elements == 0) {
+            error.clear();
+            return false;
+        }
+
+        return fillTaskFromStreamEntry(entries_reply->element[0], task, error);
     }
 
     bool RedisTaskQueue::ackTask(const std::string& stream_id, std::string& error) const {
@@ -616,6 +741,42 @@ namespace yolo11_server {
             ));
 
         return !replyIsError(reply.get(), error, context.get());
+    }
+
+    bool RedisTaskQueue::getStreamStats(RedisStreamStats& stats, std::string& error) const {
+        stats = RedisStreamStats{};
+
+        RedisContextPtr context;
+        if (!connectContext(config_, context, error, 10000)) {
+            return false;
+        }
+
+        RedisReplyPtr xlen_reply(static_cast<redisReply*>(
+            redisCommand(context.get(), "XLEN %s", config_.stream_key.c_str())
+            ));
+        if (replyIsError(xlen_reply.get(), error, context.get())) {
+            error = "XLEN failed: " + error;
+            return false;
+        }
+        if (xlen_reply->type == REDIS_REPLY_INTEGER) {
+            stats.stream_len = xlen_reply->integer;
+        }
+
+        RedisReplyPtr pending_reply(static_cast<redisReply*>(
+            redisCommand(context.get(), "XPENDING %s %s", config_.stream_key.c_str(), config_.consumer_group.c_str())
+            ));
+        if (replyIsError(pending_reply.get(), error, context.get())) {
+            error = "XPENDING failed: " + error;
+            return false;
+        }
+        if (pending_reply->type == REDIS_REPLY_ARRAY && pending_reply->elements >= 1) {
+            redisReply* total_reply = pending_reply->element[0];
+            if (total_reply != nullptr && total_reply->type == REDIS_REPLY_INTEGER) {
+                stats.pending = total_reply->integer;
+            }
+        }
+
+        return true;
     }
 
     std::string RedisTaskQueue::statusKey(const std::string& task_id) const {

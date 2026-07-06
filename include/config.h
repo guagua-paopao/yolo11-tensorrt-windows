@@ -5,7 +5,7 @@
 const static char* kInputTensorName = "images";
 const static char* kOutputTensorName = "output";
 const static char* kProtoTensorName = "proto";
-const static int kNumClass = 16; //obb 16, detector 80
+const static int kNumClass = 80; //obb 16, detector 80
 const static int kPoseNumClass = 1;
 const static int kNumberOfPoints = 17;  // number of keypoints total
 // obb model's number of classes

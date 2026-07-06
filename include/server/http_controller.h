@@ -1,12 +1,8 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
 #include <mutex>
-#include <queue>
 #include <string>
-#include <thread>
-#include <unordered_map>
 
 #include <crow.h>
 
@@ -29,22 +25,6 @@ namespace yolo11_server {
         HttpController& operator=(const HttpController&) = delete;
 
         void registerRoutes(crow::SimpleApp& app);
-
-    private:
-        struct AsyncTaskRecord {
-            std::string task_id;
-            std::string status = "queued";
-            std::string error;
-
-            std::string input_image_path;
-            std::string result_image_filename;
-            std::string result_image_path;
-            std::string result_json_text;
-
-            long long create_time_ms = 0;
-            long long start_time_ms = 0;
-            long long finish_time_ms = 0;
-        };
 
     private:
         crow::response handleHealth() const;
