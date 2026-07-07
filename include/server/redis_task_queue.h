@@ -14,6 +14,7 @@ namespace yolo11_server {
     struct RedisTask {
         std::string stream_id;
         std::string task_id;
+        std::string model_type = "detect";
 
         // Production path: image bytes are stored in Redis, so server/worker can be separated.
         std::string input_image_key;
@@ -29,6 +30,7 @@ namespace yolo11_server {
         bool found = false;
         std::string task_id;
         std::string status;
+        std::string model_type;
         std::string error;
         std::string result_json_text;
         std::string input_image_key;

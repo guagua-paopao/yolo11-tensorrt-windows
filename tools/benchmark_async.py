@@ -81,14 +81,14 @@ def http_json(method: str, url: str, body: Optional[bytes] = None, content_type:
         return data
 
 
-def submit_one(index: int, base_url: str, image_bytes: bytes, content_type: str, timeout: float) -> TaskRecord:
+def submit_one(index: int, base_url: str, endpoint: str, image_bytes: bytes, content_type: str, timeout: float) -> TaskRecord:
     rec = TaskRecord(index=index)
     rec.submit_time = time.time()
     t0 = time.perf_counter()
     try:
         data = http_json(
             "POST",
-            base_url.rstrip("/") + "/api/v1/detect/image/async",
+            base_url.rstrip("/") + endpoint,
             body=image_bytes,
             content_type=content_type,
             timeout=timeout,
@@ -165,6 +165,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:8080", help="Server base URL")
     parser.add_argument("--image", required=True, help="Image path")
+    parser.add_argument("--endpoint", default="/api/v1/detect/image/async", help="Async submit endpoint, for example /api/v1/detect/obb/async")
     parser.add_argument("--tasks", type=int, default=100, help="Number of async tasks")
     parser.add_argument("--concurrency", type=int, default=5, help="Concurrent submissions")
     parser.add_argument("--timeout", type=float, default=120.0, help="Total polling timeout in seconds")
@@ -182,6 +183,7 @@ def main() -> int:
 
     print(f"Server:      {args.url}")
     print(f"Image:       {image_path} ({len(image_bytes)} bytes, {content_type})")
+    print(f"Endpoint:    {args.endpoint}")
     print(f"Tasks:       {args.tasks}")
     print(f"Concurrency: {args.concurrency}")
 
@@ -190,7 +192,7 @@ def main() -> int:
 
     with futures.ThreadPoolExecutor(max_workers=args.concurrency) as executor:
         futs = [
-            executor.submit(submit_one, i, args.url, image_bytes, content_type, args.request_timeout)
+            executor.submit(submit_one, i, args.url, args.endpoint, image_bytes, content_type, args.request_timeout)
             for i in range(args.tasks)
         ]
         for fut in futures.as_completed(futs):

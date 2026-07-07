@@ -1,18 +1,21 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "server/app_config.h"
 #include "server/redis_task_queue.h"
 #include "server/label_map.h"
 #include "yolo11_detector_api.h"
+#include "yolo11_obb_api.h"
 
 namespace yolo11_server {
 
-    // One InferenceWorker = one Redis consumer + one independent Yolo11Detector.
+    // One InferenceWorker = one Redis consumer + one independent TensorRT detector.
     // Do not share TensorRT execution context / CUDA stream / CUDA buffer across worker threads.
     class InferenceWorker {
     public:
@@ -32,6 +35,10 @@ namespace yolo11_server {
         void loop();
         void processRedisTask(const RedisTask& task);
         void releaseDetectorNoexcept() noexcept;
+        bool initDetectorByModelType();
+        std::vector<Detection> inferByModelType(const cv::Mat& image);
+        cv::Mat drawByModelType(const cv::Mat& image, const std::vector<Detection>& detections);
+        bool isObbModel() const;
 
         void heartbeatLoop() noexcept;
         void writeHeartbeatNoexcept() noexcept;
@@ -46,7 +53,8 @@ namespace yolo11_server {
         int worker_id_ = 0;
         AppConfig config_;
         RedisTaskQueue redis_queue_;
-        yolo11::Yolo11Detector detector_;
+        std::unique_ptr<yolo11::Yolo11Detector> detector_;
+        std::unique_ptr<yolo11::Yolo11ObbDetector> obb_detector_;
         LabelMap label_map_;
 
         std::thread thread_;

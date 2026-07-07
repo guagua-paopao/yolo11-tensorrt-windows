@@ -37,6 +37,13 @@ namespace yolo11_server {
             return config;
         }
 
+        std::string toLowerString(std::string text) {
+            std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+                });
+            return text;
+        }
+
         std::string processIdString() {
 #ifdef _WIN32
             return std::to_string(static_cast<unsigned long long>(::GetCurrentProcessId()));
@@ -91,17 +98,11 @@ namespace yolo11_server {
             return false;
         }
 
-        yolo11::DetectorConfig detector_config;
-        detector_config.engine_path = config_.model.engine_path;
-        detector_config.gpu_id = config_.model.gpu_id;
-        detector_config.use_gpu_postprocess = config_.model.use_gpu_postprocess;
+        spdlog::info("Worker {} loading TensorRT engine: {}, model_type={}, consumer={}",
+            worker_id_, config_.model.engine_path, config_.model.type, config_.redis.consumer_name);
 
-        spdlog::info("Worker " + std::to_string(worker_id_) +
-            " loading TensorRT engine: " + detector_config.engine_path +
-            ", consumer=" + config_.redis.consumer_name);
-
-        if (!detector_.init(detector_config)) {
-            spdlog::error("Worker " + std::to_string(worker_id_) + " failed to initialize detector.");
+        if (!initDetectorByModelType()) {
+            spdlog::error("Worker {} failed to initialize detector for model.type={}", worker_id_, config_.model.type);
             return false;
         }
         detector_initialized_ = true;
@@ -169,7 +170,14 @@ namespace yolo11_server {
         }
 
         try {
-            detector_.release();
+            if (detector_) {
+                detector_->release();
+                detector_.reset();
+            }
+            if (obb_detector_) {
+                obb_detector_->release();
+                obb_detector_.reset();
+            }
             detector_initialized_ = false;
         }
         catch (const std::exception& e) {
@@ -180,6 +188,64 @@ namespace yolo11_server {
             spdlog::error("Detector release unknown exception.");
             detector_initialized_ = false;
         }
+    }
+
+    bool InferenceWorker::isObbModel() const {
+        return toLowerString(config_.model.type) == "obb";
+    }
+
+    bool InferenceWorker::initDetectorByModelType() {
+        const std::string model_type = toLowerString(config_.model.type);
+        if (model_type == "detect") {
+            yolo11::DetectorConfig detector_config;
+            detector_config.engine_path = config_.model.engine_path;
+            detector_config.gpu_id = config_.model.gpu_id;
+            detector_config.use_gpu_postprocess = config_.model.use_gpu_postprocess;
+
+            detector_ = std::make_unique<yolo11::Yolo11Detector>();
+            return detector_->init(detector_config);
+        }
+
+        if (model_type == "obb") {
+            yolo11::ObbConfig obb_config;
+            obb_config.engine_path = config_.model.engine_path;
+            obb_config.gpu_id = config_.model.gpu_id;
+            obb_config.use_gpu_postprocess = config_.model.use_gpu_postprocess;
+
+            obb_detector_ = std::make_unique<yolo11::Yolo11ObbDetector>();
+            return obb_detector_->init(obb_config);
+        }
+
+        spdlog::error("Unsupported worker model.type={}. Supported values: detect, obb", config_.model.type);
+        return false;
+    }
+
+    std::vector<Detection> InferenceWorker::inferByModelType(const cv::Mat& image) {
+        if (isObbModel()) {
+            if (!obb_detector_) {
+                throw std::runtime_error("OBB detector is not initialized");
+            }
+            return obb_detector_->infer(image);
+        }
+
+        if (!detector_) {
+            throw std::runtime_error("Detection detector is not initialized");
+        }
+        return detector_->infer(image);
+    }
+
+    cv::Mat InferenceWorker::drawByModelType(const cv::Mat& image, const std::vector<Detection>& detections) {
+        if (isObbModel()) {
+            if (!obb_detector_) {
+                throw std::runtime_error("OBB detector is not initialized");
+            }
+            return obb_detector_->draw(image, detections);
+        }
+
+        if (!detector_) {
+            throw std::runtime_error("Detection detector is not initialized");
+        }
+        return detector_->draw(image, detections);
     }
 
     bool InferenceWorker::running() const {
@@ -271,9 +337,9 @@ namespace yolo11_server {
             cv::Mat result_image;
             auto t0 = std::chrono::steady_clock::now();
 
-            detections = detector_.infer(image);
+            detections = inferByModelType(image);
             if (config_.output.save_result_image) {
-                result_image = detector_.draw(image, detections);
+                result_image = drawByModelType(image, detections);
             }
 
             auto t1 = std::chrono::steady_clock::now();
@@ -344,8 +410,14 @@ namespace yolo11_server {
                 {"height", image.rows},
                 {"channels", image.channels()}
             };
-            body["bbox_coordinate_system"] = "original_image_pixels";
-            body["bbox_format"] = "xywh_and_xyxy";
+            if (isObbModel()) {
+                body["obb_coordinate_system"] = "original_image_pixels";
+                body["obb_format"] = "cxcywh_angle_points";
+            }
+            else {
+                body["bbox_coordinate_system"] = "original_image_pixels";
+                body["bbox_format"] = "xywh_and_xyxy";
+            }
             body["num_detections"] = detections.size();
             body["queue_wait_ms"] = queue_wait_ms;
             body["inference_ms"] = infer_ms;
@@ -353,7 +425,7 @@ namespace yolo11_server {
             body["create_time_ms"] = task.create_time_ms;
             body["start_time_ms"] = start_time_ms;
             body["finish_time_ms"] = finish_time_ms;
-            body["detections"] = ResultSerializer::detectionsToJson(detections, image, label_map_, false);
+            body["detections"] = ResultSerializer::detectionsToJsonByModel(detections, image, label_map_, config_.model.type, false);
             if (!result_image_key.empty()) {
                 body["result_image_key"] = result_image_key;
             }

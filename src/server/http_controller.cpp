@@ -82,6 +82,12 @@ namespace yolo11_server {
             return lower == "1" || lower == "true" || lower == "yes" || lower == "on";
         }
 
+        std::string phaseNameForModelType(const std::string& model_type) {
+            return toLowerString(model_type) == "obb"
+                ? "phase10_0_obb_async_minimal"
+                : "phase8_5_logging_labels_metrics";
+        }
+
         crow::response makeJsonResponse(int code, const nlohmann::json& body) {
             crow::response response(code);
             response.set_header("Content-Type", "application/json; charset=utf-8");
@@ -163,6 +169,12 @@ namespace yolo11_server {
             return handleDetectImageAsync(request);
                 });
 
+        CROW_ROUTE(app, "/api/v1/detect/obb/async")
+            .methods(crow::HTTPMethod::POST)
+            ([this](const crow::request& request) {
+            return handleDetectObbImageAsync(request);
+                });
+
         CROW_ROUTE(app, "/api/v1/result/<string>")
             .methods(crow::HTTPMethod::GET)
             ([this](const std::string& task_id) {
@@ -187,7 +199,7 @@ namespace yolo11_server {
         body["success"] = true;
         body["status"] = "ok";
         body["service"] = "yolo11_server";
-        body["phase"] = "phase8_5_logging_labels_metrics";
+        body["phase"] = phaseNameForModelType(config_.model.type);
         body["role"] = "http_producer";
         body["model_type"] = config_.model.type;
         body["engine_path"] = config_.model.engine_path;
@@ -247,7 +259,7 @@ namespace yolo11_server {
         nlohmann::json body;
         body["success"] = true;
         body["service"] = "yolo11_server";
-        body["phase"] = "phase8_5_logging_labels_metrics";
+        body["phase"] = phaseNameForModelType(config_.model.type);
         body["server_status"] = "ok";
         body["redis_status"] = redis_mode_ ? "unknown" : "disabled";
         body["worker_status"] = "unknown";
@@ -448,7 +460,7 @@ namespace yolo11_server {
         nlohmann::json body;
         body["success"] = true;
         body["service"] = "yolo11_server";
-        body["phase"] = "phase8_5_logging_labels_metrics";
+        body["phase"] = phaseNameForModelType(config_.model.type);
         body["metrics_enabled"] = config_.redis.metrics_enabled;
         body["metrics_found"] = metrics.found;
         body["recent_window_seconds"] = metrics.recent_window_seconds;
@@ -627,6 +639,26 @@ namespace yolo11_server {
     }
 
     crow::response HttpController::handleDetectImageAsync(const crow::request& request) {
+        return handleImageAsync(request, "detect");
+    }
+
+    crow::response HttpController::handleDetectObbImageAsync(const crow::request& request) {
+        return handleImageAsync(request, "obb");
+    }
+
+    crow::response HttpController::handleImageAsync(const crow::request& request, const std::string& expected_model_type) {
+        const std::string current_model_type = toLowerString(config_.model.type);
+        const std::string target_model_type = toLowerString(expected_model_type);
+        if (current_model_type != target_model_type) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "MODEL_TYPE_MISMATCH";
+            body["error"] = "this server config is not for the requested async endpoint";
+            body["configured_model_type"] = config_.model.type;
+            body["requested_model_type"] = target_model_type;
+            return makeJsonResponse(503, body);
+        }
+
         if (!redis_mode_) {
             nlohmann::json body;
             body["success"] = false;
@@ -768,6 +800,7 @@ namespace yolo11_server {
 
         RedisTask task;
         task.task_id = task_id;
+        task.model_type = target_model_type;
         task.input_image_key = input_key;
         task.result_image_key = result_key;
         task.input_image_path = input_path;
@@ -788,6 +821,7 @@ namespace yolo11_server {
         nlohmann::json body;
         body["success"] = true;
         body["task_id"] = task_id;
+        body["model_type"] = target_model_type;
         body["status"] = "queued";
         body["queue_backend"] = "redis_stream";
         body["image_storage"] = "redis_binary_keys";
@@ -796,8 +830,8 @@ namespace yolo11_server {
         body["result_url"] = "/api/v1/result/" + task_id;
         body["result_image_url"] = "/api/v1/result/" + task_id + "/image";
 
-        spdlog::info("Async task submitted: task_id={}, input_bytes={}, redis_input_key={}",
-            task_id, normalized_jpeg.size(), input_key);
+        spdlog::info("Async task submitted: task_id={}, model_type={}, input_bytes={}, redis_input_key={}",
+            task_id, target_model_type, normalized_jpeg.size(), input_key);
 
         return makeJsonResponse(202, body);
     }
@@ -843,6 +877,7 @@ namespace yolo11_server {
         body["success"] = task_status.status != "failed";
         body["task_id"] = task_status.task_id;
         body["status"] = task_status.status;
+        body["model_type"] = task_status.model_type.empty() ? config_.model.type : task_status.model_type;
         body["queue_backend"] = "redis_stream";
         body["image_storage"] = "redis_binary_keys";
         body["create_time_ms"] = task_status.create_time_ms;

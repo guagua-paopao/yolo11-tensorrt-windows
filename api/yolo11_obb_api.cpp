@@ -128,7 +128,7 @@ namespace yolo11 {
         std::cout << "kObbInputW = " << kObbInputW
             << ", kObbInputH = " << kObbInputH << std::endl;
         std::cout << "kBatchSize = " << kBatchSize << std::endl;
-        std::cout << "kNumClass = " << kNumClass << std::endl;
+        std::cout << "kObbNumClass = " << kObbNumClass << std::endl;
         std::cout << "model_bboxes = " << model_bboxes_ << std::endl;
         std::cout << "use_gpu_postprocess = "
             << (config_.use_gpu_postprocess ? "true" : "false") << std::endl;

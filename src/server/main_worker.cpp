@@ -205,8 +205,8 @@ int main(int argc, char** argv) {
         const bool single_consumer_mode = readStringArg(argc, argv, "--consumer-name", consumer_name_override)
             && !consumer_name_override.empty();
 
-        if (app_config.model.type != "detect") {
-            std::cerr << "yolo11_worker currently supports model.type=detect only. Current model.type="
+        if (app_config.model.type != "detect" && app_config.model.type != "obb") {
+            std::cerr << "yolo11_worker supports model.type=detect or model.type=obb. Current model.type="
                 << app_config.model.type << std::endl;
 #ifdef _WIN32
             WSACleanup();

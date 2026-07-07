@@ -33,6 +33,8 @@ namespace yolo11_server {
         crow::response handleMetrics() const;
         crow::response handleDetectImage(const crow::request& request);
         crow::response handleDetectImageAsync(const crow::request& request);
+        crow::response handleDetectObbImageAsync(const crow::request& request);
+        crow::response handleImageAsync(const crow::request& request, const std::string& expected_model_type);
         crow::response handleGetAsyncResult(const std::string& task_id) const;
         crow::response handleGetResultImageByTaskId(const std::string& task_id) const;
         crow::response handleGetResultImage(const std::string& filename) const;

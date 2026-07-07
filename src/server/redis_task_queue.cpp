@@ -282,6 +282,22 @@ namespace yolo11_server {
             return !values.empty();
         }
 
+        std::string sanitizeRedisKeyPart(std::string text) {
+            for (char& ch : text) {
+                const bool ok = (ch >= 'a' && ch <= 'z') ||
+                    (ch >= 'A' && ch <= 'Z') ||
+                    (ch >= '0' && ch <= '9') ||
+                    ch == '_' || ch == '-';
+                if (!ok) {
+                    ch = '_';
+                }
+            }
+            if (text.empty()) {
+                return "default";
+            }
+            return text;
+        }
+
         bool fillTaskFromStreamEntry(redisReply* entry_reply, RedisTask& task, std::string& error) {
             task = RedisTask{};
 
@@ -304,10 +320,14 @@ namespace yolo11_server {
             }
 
             task.task_id = fields["task_id"];
+            task.model_type = fields["model_type"];
             task.input_image_path = fields["input_image_path"];
             task.input_image_key = fields["input_image_key"];
             task.result_image_key = fields["result_image_key"];
             task.create_time_ms = parseLongLong(fields["create_time_ms"]);
+            if (task.model_type.empty()) {
+                task.model_type = "detect";
+            }
 
             if (task.stream_id.empty() || task.task_id.empty()) {
                 error = "invalid redis stream message: missing stream_id/task_id";
@@ -515,9 +535,10 @@ namespace yolo11_server {
             context_,
             error,
             10000,
-            "HSET %s task_id %s input_image_path %s input_image_key %s result_image_key %s create_time_ms %lld start_time_ms %lld finish_time_ms %lld queue_wait_ms %lld infer_ms %s total_ms %lld worker_id %s consumer_name %s error %s result_image_path %s result_image_filename %s",
+            "HSET %s task_id %s model_type %s input_image_path %s input_image_key %s result_image_key %s create_time_ms %lld start_time_ms %lld finish_time_ms %lld queue_wait_ms %lld infer_ms %s total_ms %lld worker_id %s consumer_name %s error %s result_image_path %s result_image_filename %s",
             meta_key.c_str(),
             task.task_id.c_str(),
+            task.model_type.empty() ? "detect" : task.model_type.c_str(),
             task.input_image_path.c_str(),
             task.input_image_key.c_str(),
             task.result_image_key.c_str(),
@@ -546,9 +567,10 @@ namespace yolo11_server {
             context_,
             error,
             10000,
-            "XADD %s * task_id %s input_image_key %s result_image_key %s input_image_path %s create_time_ms %lld",
+            "XADD %s * task_id %s model_type %s input_image_key %s result_image_key %s input_image_path %s create_time_ms %lld",
             config_.stream_key.c_str(),
             task.task_id.c_str(),
+            task.model_type.empty() ? "detect" : task.model_type.c_str(),
             task.input_image_key.c_str(),
             task.result_image_key.c_str(),
             task.input_image_path.c_str(),
@@ -836,6 +858,7 @@ namespace yolo11_server {
                 return it == values.end() ? std::string{} : it->second;
                 };
             status.error = getValue("error");
+            status.model_type = getValue("model_type");
             status.input_image_key = getValue("input_image_key");
             status.result_image_key = getValue("result_image_key");
             status.result_image_path = getValue("result_image_path");
@@ -1077,7 +1100,7 @@ namespace yolo11_server {
         auto getGlobal = [&global_values](const std::string& key) -> std::string {
             auto it = global_values.find(key);
             return it == global_values.end() ? std::string{} : it->second;
-        };
+            };
 
         metrics.done_count = parseLongLong(getGlobal("done_count"));
         metrics.failed_count = parseLongLong(getGlobal("failed_count"));
@@ -1208,7 +1231,7 @@ namespace yolo11_server {
         auto getValue = [&values](const std::string& key) -> std::string {
             auto it = values.find(key);
             return it == values.end() ? std::string{} : it->second;
-        };
+            };
 
         stats.found = true;
         stats.used_memory_bytes = parseLongLong(getValue("used_memory"));
@@ -1299,7 +1322,7 @@ namespace yolo11_server {
                 auto getValue = [&values](const std::string& key) -> std::string {
                     auto it = values.find(key);
                     return it == values.end() ? std::string{} : it->second;
-                };
+                    };
                 const std::string consumer = getValue("consumer_name");
                 if (!consumer.empty()) {
                     record.consumer_name = consumer;
@@ -1341,19 +1364,19 @@ namespace yolo11_server {
 
 
     std::string RedisTaskQueue::metricsGlobalKey() const {
-        return "yolo:metrics:global";
+        return "yolo:metrics:" + sanitizeRedisKeyPart(config_.stream_key) + ":global";
     }
 
     std::string RedisTaskQueue::metricsWorkerDoneKey() const {
-        return "yolo:metrics:worker:done";
+        return "yolo:metrics:" + sanitizeRedisKeyPart(config_.stream_key) + ":worker:done";
     }
 
     std::string RedisTaskQueue::metricsWorkerFailedKey() const {
-        return "yolo:metrics:worker:failed";
+        return "yolo:metrics:" + sanitizeRedisKeyPart(config_.stream_key) + ":worker:failed";
     }
 
     std::string RedisTaskQueue::metricsRecentDoneKey() const {
-        return "yolo:metrics:recent:done";
+        return "yolo:metrics:" + sanitizeRedisKeyPart(config_.stream_key) + ":recent:done";
     }
 
     std::string RedisTaskQueue::statusKey(const std::string& task_id) const {

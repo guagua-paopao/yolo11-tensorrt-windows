@@ -24,8 +24,8 @@ namespace yolo11_server {
             return true;
         }
 
-        if (config_.model.type != "detect") {
-            std::cerr << "InferenceService currently supports model.type=detect only. Current model.type="
+        if (config_.model.type != "detect" && config_.model.type != "obb") {
+            std::cerr << "InferenceService supports model.type=detect or model.type=obb. Current model.type="
                 << config_.model.type << std::endl;
             return false;
         }
