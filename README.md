@@ -1,8 +1,8 @@
-# YOLO11 TensorRT Windows
+# YOLO11 TensorRT Windows C++ Inference Service
 
-Windows-based YOLO11 TensorRT deployment project with Visual Studio 2019, CUDA, TensorRT 10, OpenCV, reusable C++ runtime APIs, and a pure C++ HTTP detection service.
+Windows-based YOLO11 TensorRT deployment project using Visual Studio 2019, CUDA, TensorRT 10, OpenCV, Crow, hiredis, Redis Stream, spdlog, yaml-cpp, nlohmann/json, and reusable C++ runtime APIs.
 
-The current implementation focuses on YOLO11 detection service deployment. It supports synchronous HTTP image detection, Redis Stream based asynchronous task submission, a multi-worker inference pool, task status/result query, result image access, benchmark testing, pending-task recovery, and Redis Stream length control.
+The current version focuses on a production-style YOLO11 detection image service. It supports command-line inference, reusable C++ detector APIs, a pure C++ HTTP server, Redis Stream asynchronous task queues, a multi-worker TensorRT inference pool, Server/Worker process split, Redis binary image storage, Worker heartbeat, readiness checks, Redis image TTL, structured logs, external label mapping, and runtime metrics.
 
 ## Current Status
 
@@ -12,20 +12,30 @@ The current implementation focuses on YOLO11 detection service deployment. It su
 | YOLO11 OBB command-line inference | Supported |
 | C++ detection runtime API | Supported |
 | C++ OBB runtime API | Supported, CPU post-processing verified |
-| Detection image demo | Supported |
-| Detection video / camera demo | Supported |
+| Detection image / video / camera demos | Supported |
 | OBB image demo | Supported |
 | Pure C++ HTTP detection server | Supported |
-| Synchronous HTTP image detection | Supported |
+| Server / Worker process split | Supported |
+| `yolo11_server.exe` HTTP producer/query process | Supported |
+| `yolo11_worker.exe` Redis Stream inference worker process | Supported |
 | Redis Stream async image detection | Supported |
-| Redis Stream consumer group | Supported |
-| Multi-worker inference pool | Supported, `worker_num=3` verified |
-| Task metrics: queue / inference / total latency | Supported |
+| Redis binary input/result image storage | Supported |
+| Redis input image cleanup after completion | Supported |
+| Redis result image TTL | Supported |
+| Redis memory guard in readiness check | Supported |
+| Multi-worker inference pool | Supported, 3 workers verified |
+| Redis connection reuse and reconnect-on-failure | Supported |
 | Pending task reclaim with `XAUTOCLAIM` | Supported |
 | Redis Stream trimming with `XTRIM MAXLEN ~` | Supported |
-| Benchmark script | Supported |
+| Worker heartbeat | Supported |
+| `/api/v1/health`, `/api/v1/ready`, `/api/v1/workers` | Supported |
+| Worker-offline submission protection | Supported, returns HTTP 503 |
+| Structured logs with spdlog | Supported: `logs/server.log`, `logs/worker.log` |
+| External labels via `labels_path` | Supported: `labels/coco.txt` |
+| Unified result serialization | Supported |
+| `/api/v1/metrics` | Supported |
+| Phase 8.5 standard benchmark | Passed, 1000/0/0, QPS 59.177 |
 | OBB / Seg / Pose / Video service APIs | Planned later |
-| Redis connection reuse / connection pool | Next optimization |
 
 ## Tested Environment
 
@@ -43,7 +53,7 @@ The current implementation focuses on YOLO11 detection service deployment. It su
 | GPU | RTX 4080 Laptop GPU |
 | CUDA Architecture | `sm_89` |
 
-Runtime DLL paths should be available in the system `Path` or the current terminal session:
+Runtime DLL paths should be available in the system `Path` or in the current terminal session:
 
 ```powershell
 $env:PATH="D:\TensorRT-10.16.1.11\lib;D:\GPU13.3\bin;D:\libs\opencv\build\x64\vc16\bin;$env:PATH"
@@ -60,9 +70,10 @@ cd /d D:\vcpkg
 .\vcpkg.exe install yaml-cpp:x64-windows --vcpkg-root D:\vcpkg
 .\vcpkg.exe install crow:x64-windows --vcpkg-root D:\vcpkg
 .\vcpkg.exe install hiredis:x64-windows --vcpkg-root D:\vcpkg
+.\vcpkg.exe install spdlog:x64-windows --vcpkg-root D:\vcpkg
 ```
 
-Configure CMake with the vcpkg toolchain:
+Configure CMake with the vcpkg toolchain when needed:
 
 ```bat
 cmake -S . -B build -G "Visual Studio 16 2019" -A x64 -DCMAKE_TOOLCHAIN_FILE=D:/vcpkg/scripts/buildsystems/vcpkg.cmake
@@ -76,7 +87,10 @@ yolo11-tensorrt-windows
 │   ├── yolo11_detector_api.cpp
 │   └── yolo11_obb_api.cpp
 ├── config
-│   └── server.yaml
+│   ├── server.yaml
+│   └── worker.yaml
+├── labels
+│   └── coco.txt
 ├── examples
 │   ├── demo_image.cpp
 │   ├── demo_video.cpp
@@ -84,10 +98,12 @@ yolo11-tensorrt-windows
 ├── include
 │   ├── server
 │   │   ├── app_config.h
+│   │   ├── app_logger.h
 │   │   ├── http_controller.h
 │   │   ├── image_codec.h
 │   │   ├── inference_service.h
 │   │   ├── inference_worker.h
+│   │   ├── label_map.h
 │   │   ├── redis_task_queue.h
 │   │   └── result_serializer.h
 │   ├── config.h
@@ -96,11 +112,14 @@ yolo11-tensorrt-windows
 ├── src
 │   ├── server
 │   │   ├── app_config.cpp
+│   │   ├── app_logger.cpp
 │   │   ├── http_controller.cpp
 │   │   ├── image_codec.cpp
 │   │   ├── inference_service.cpp
 │   │   ├── inference_worker.cpp
+│   │   ├── label_map.cpp
 │   │   ├── main_server.cpp
+│   │   ├── main_worker.cpp
 │   │   ├── redis_task_queue.cpp
 │   │   └── result_serializer.cpp
 │   ├── preprocess.cu
@@ -114,17 +133,18 @@ yolo11-tensorrt-windows
 ├── engines
 ├── output
 ├── temp
+├── logs
 ├── gen_wts.py
 ├── yolo11_det.cpp
 ├── yolo11_obb.cpp
 └── CMakeLists.txt
 ```
 
-Generated directories and model files such as `out/`, `build/`, `output/`, `temp/`, `*.engine`, `*.pt`, and `*.wts` should not be committed to Git.
+Generated directories and model files such as `out/`, `build/`, `.vs/`, `output/`, `temp/`, `logs/`, `*.engine`, `*.pt`, `*.wts`, and `*.onnx` should not be committed to Git.
 
-## Model Configuration
+## Model and Label Configuration
 
-Main model configuration file:
+Low-level TensorRT model class count is still configured in:
 
 ```text
 include/config.h
@@ -142,33 +162,39 @@ For official YOLO11 OBB / DOTA models:
 const static int kNumClass = 16;
 ```
 
-For a custom one-class model:
-
-```cpp
-const static int kNumClass = 1;
-```
-
 After changing `kNumClass`, model structure, TensorRT version, CUDA version, or GPU architecture, rebuild the project and regenerate the TensorRT engine. Do not reuse an old `.engine` file.
 
-## Server Configuration
+Class names used by HTTP JSON results are loaded from `labels_path`:
 
-Server configuration file:
-
-```text
-config/server.yaml
+```yaml
+model:
+  labels_path: "D:/tensorrtx/yolo11/labels/coco.txt"
 ```
 
-Recommended configuration for the current verified setup:
+For COCO, `labels/coco.txt` should contain 80 lines. The health API should report:
+
+```json
+{
+  "labels_loaded": true,
+  "label_count": 80
+}
+```
+
+## Recommended Server Configuration
+
+`config/server.yaml`:
 
 ```yaml
 server:
   host: "0.0.0.0"
   port: 8080
   threads: 4
+  enable_sync_detect: false
 
 model:
   type: "detect"
   engine_path: "D:/tensorrtx/yolo11/engines/yolo11n.engine"
+  labels_path: "D:/tensorrtx/yolo11/labels/coco.txt"
   gpu_id: 0
   use_gpu_postprocess: false
 
@@ -189,14 +215,39 @@ redis:
   consumer_name: "worker_1"
   block_ms: 500
   ttl_seconds: 1800
+  task_ttl_seconds: 1800
+  input_image_ttl_seconds: 600
+  result_image_ttl_seconds: 1800
+  max_image_bytes: 5242880
+  max_result_image_bytes: 5242880
+  delete_input_after_done: true
+  max_redis_used_memory_mb: 2048
   stream_max_len: 10000
   enable_pending_reclaim: true
-  pending_min_idle_ms: 60000
+  pending_min_idle_ms: 10000
+  image_storage: "redis_binary_keys"
 
 worker:
+  enabled: false
   worker_num: 3
+  min_alive_workers: 1
   consumer_name_prefix: "worker_"
+  heartbeat_enabled: true
+  heartbeat_interval_ms: 3000
+  heartbeat_ttl_seconds: 15
   log_task_done: false
+
+logging:
+  enabled: true
+  log_dir: "./logs"
+  server_log_file: "server.log"
+  worker_log_file: "worker.log"
+  level: "info"
+  console: true
+
+metrics:
+  enabled: true
+  recent_window_seconds: 60
 ```
 
 Use the current WSL IP from `hostname -I` when Redis runs in WSL.
@@ -212,13 +263,6 @@ ss -lntp | grep 6379
 hostname -I
 ```
 
-Expected output includes:
-
-```text
-PONG
-172.19.196.109
-```
-
 Verify Redis from Windows:
 
 ```powershell
@@ -232,15 +276,17 @@ redis-cli -h 172.19.196.109 -p 6379 INFO server
 redis-cli -h 172.19.196.109 -p 6379 XPENDING yolo:stream:detect yolo11_group
 redis-cli -h 172.19.196.109 -p 6379 XINFO CONSUMERS yolo:stream:detect yolo11_group
 redis-cli -h 172.19.196.109 -p 6379 XLEN yolo:stream:detect
+redis-cli -h 172.19.196.109 -p 6379 INFO memory
 ```
 
 ## Build
 
-Open the project folder with Visual Studio 2019 or build from PowerShell:
+Build the server and worker targets:
 
 ```powershell
 cd D:\tensorrtx\yolo11
 cmake --build out\build\x64-Debug --config Debug --target yolo11_server
+cmake --build out\build\x64-Debug --config Debug --target yolo11_worker
 ```
 
 Common build targets:
@@ -253,9 +299,10 @@ demo_image
 demo_video
 demo_obb_image
 yolo11_server
+yolo11_worker
 ```
 
-`myplugins.dll` must be in the same directory as the executable. The CMake configuration copies it automatically after build.
+`myplugins.dll` must be in the same directory as the executable. The CMake configuration should copy it automatically after build.
 
 ## Convert Model and Build TensorRT Engine
 
@@ -292,62 +339,139 @@ yolo11_obb.exe -s yolo11n-obb.wts yolo11n-obb.engine n
 yolo11_obb.exe -d yolo11n-obb.engine D:\tensorrtx\yolo11\images c
 ```
 
-## Run HTTP Detection Server
+## Run Server / Worker Deployment
 
-Start the server:
+### 1. Start the HTTP server
 
 ```powershell
-cd D:\tensorrtx\yolo11\out\build\x64-Debug
-.\yolo11_server.exe D:\tensorrtx\yolo11\config\server.yaml
+cd D:\tensorrtx\yolo11
+
+$env:PATH="D:\TensorRT-10.16.1.11\lib;D:\GPU13.3\bin;D:\libs\opencv\build\x64\vc16\bin;$env:PATH"
+
+.\out\build\x64-Debug\yolo11_server.exe .\config\server.yaml
 ```
 
-Expected startup logs include:
+The server is a lightweight HTTP producer/query process when `server.enable_sync_detect=false`. It submits tasks to Redis, queries results, serves result images from Redis binary keys, and exposes health/readiness/metrics APIs. It does not need to load TensorRT in production mode.
 
-```text
-Loading sync TensorRT engine: D:/tensorrtx/yolo11/engines/yolo11n.engine
-kNumClass = 80
-Starting InferenceService: worker_num=3, stream=yolo:stream:detect, group=yolo11_group
-InferenceWorker started: id=1, consumer=worker_1, backend=redis_stream
-InferenceWorker started: id=2, consumer=worker_2, backend=redis_stream
-InferenceWorker started: id=3, consumer=worker_3, backend=redis_stream
-YOLO11 server started.
+### 2. Start workers
+
+One process with three internal workers:
+
+```powershell
+cd D:\tensorrtx\yolo11
+
+$env:PATH="D:\TensorRT-10.16.1.11\lib;D:\GPU13.3\bin;D:\libs\opencv\build\x64\vc16\bin;$env:PATH"
+
+.\out\build\x64-Debug\yolo11_worker.exe .\config\worker.yaml --worker-num 3
 ```
 
-Health check:
+Or start three independent worker processes:
+
+```powershell
+.\out\build\x64-Debug\yolo11_worker.exe .\config\worker.yaml --consumer-name worker_1
+.\out\build\x64-Debug\yolo11_worker.exe .\config\worker.yaml --consumer-name worker_2
+.\out\build\x64-Debug\yolo11_worker.exe .\config\worker.yaml --consumer-name worker_3
+```
+
+For crash-recovery validation, independent worker processes are preferred.
+
+## HTTP APIs
+
+### Health
 
 ```powershell
 curl.exe "http://127.0.0.1:8080/api/v1/health"
 ```
 
-Expected fields:
+Expected key fields:
 
 ```json
 {
   "success": true,
   "status": "ok",
+  "phase": "phase8_5_logging_labels_metrics",
   "queue_backend": "redis_stream",
   "redis_ping": "ok",
   "redis_pending": 0,
-  "redis_stream_len": 10012,
-  "redis_stream_max_len": 10000,
-  "redis_pending_reclaim": true,
-  "worker_num": 3
+  "labels_loaded": true,
+  "label_count": 80
 }
 ```
 
-## HTTP APIs
-
-### Synchronous Image Detection
+### Readiness
 
 ```powershell
-curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image" -H "Content-Type: image/png" --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+curl.exe "http://127.0.0.1:8080/api/v1/ready"
 ```
 
-Debug mode returns raw model bbox fields:
+Expected when the system can accept new async tasks:
+
+```json
+{
+  "success": true,
+  "ready": true,
+  "server_status": "ok",
+  "redis_status": "ok",
+  "worker_status": "ok",
+  "alive_workers": 3,
+  "redis_memory_status": "ok"
+}
+```
+
+If all workers are offline, async submission returns HTTP 503 with:
+
+```json
+{
+  "success": false,
+  "error_code": "NOT_ENOUGH_ALIVE_WORKERS",
+  "ready": false,
+  "reason": "not enough alive workers"
+}
+```
+
+### Workers
 
 ```powershell
-curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image?debug=true" -H "Content-Type: image/png" --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+curl.exe "http://127.0.0.1:8080/api/v1/workers"
 ```
+
+This endpoint reports Worker heartbeat status, PID, host, GPU id, current task, processed count, failed count, and last heartbeat age.
+
+### Metrics
+
+```powershell
+curl.exe "http://127.0.0.1:8080/api/v1/metrics"
+```
+
+Typical response fields:
+
+```json
+{
+  "success": true,
+  "phase": "phase8_5_logging_labels_metrics",
+  "metrics_enabled": true,
+  "total_tasks_done": 1101,
+  "total_tasks_failed": 0,
+  "qps_recent": 16.6666666667,
+  "recent_done_count": 1000,
+  "recent_window_seconds": 60,
+  "worker_distribution": {
+    "worker_1": 368,
+    "worker_2": 369,
+    "worker_3": 364
+  },
+  "latency": {
+    "avg_queue_wait_ms": 248.227,
+    "avg_inference_ms": 4.836,
+    "avg_total_ms": 269.547
+  },
+  "redis_pending": 0,
+  "redis_stream_len": 10000,
+  "alive_workers": 3
+}
+```
+
+`qps_recent` is calculated using a fixed recent window. For example, `1000 / 60 = 16.666`. Benchmark QPS and `/metrics` recent-window QPS use different calculation methods.
 
 ### Asynchronous Image Detection
 
@@ -366,38 +490,40 @@ Example response:
   "success": true,
   "status": "queued",
   "queue_backend": "redis_stream",
-  "task_id": "20260706_103021_1",
-  "result_url": "/api/v1/result/20260706_103021_1"
+  "image_storage": "redis_binary_keys",
+  "task_id": "20260706_205743_045_1",
+  "input_image_key": "yolo:image:20260706_205743_045_1:input",
+  "result_image_key": "yolo:image:20260706_205743_045_1:result",
+  "result_url": "/api/v1/result/20260706_205743_045_1",
+  "result_image_url": "/api/v1/result/20260706_205743_045_1/image"
 }
 ```
 
 Query result:
 
 ```powershell
-curl.exe "http://127.0.0.1:8080/api/v1/result/20260706_103021_1"
+curl.exe "http://127.0.0.1:8080/api/v1/result/<task_id>"
 ```
 
-Completed result contains:
-
-```json
-{
-  "success": true,
-  "status": "done",
-  "worker_id": 2,
-  "consumer_name": "worker_2",
-  "queue_wait_ms": 18,
-  "inference_ms": 51.0155,
-  "total_ms": 77,
-  "num_detections": 3,
-  "result_image_url": "/api/v1/image/20260706_103021_1_result.jpg"
-}
-```
-
-Download result image:
+Download result image from Redis binary storage:
 
 ```powershell
-curl.exe "http://127.0.0.1:8080/api/v1/image/20260706_103021_1_result.jpg" -o result.jpg
+curl.exe "http://127.0.0.1:8080/api/v1/result/<task_id>/image" -o result.jpg
 start .\result.jpg
+```
+
+### Synchronous Image Detection
+
+Optional debug interface. In production deployment this is usually disabled by `server.enable_sync_detect=false`.
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image" -H "Content-Type: image/png" --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+```
+
+Debug mode returns raw model bbox fields:
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image?debug=true" -H "Content-Type: image/png" --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
 ```
 
 ## Redis Data Model
@@ -406,8 +532,15 @@ start .\result.jpg
 |---|---|---|
 | `yolo:stream:detect` | Stream | Async detection task queue |
 | `yolo:task:{task_id}:status` | String | `queued`, `running`, `done`, or `failed` |
-| `yolo:task:{task_id}:meta` | Hash | Task path, timestamp, worker, latency, error, result image path |
+| `yolo:task:{task_id}:meta` | Hash | Task metadata, worker, timestamps, latency, error, result image info |
 | `yolo:task:{task_id}:result` | String | Final result JSON |
+| `yolo:image:{task_id}:input` | Binary String | Input image bytes, deleted after successful completion when enabled |
+| `yolo:image:{task_id}:result` | Binary String | Rendered result image bytes, served by the HTTP server with TTL |
+| `yolo:worker:{consumer}:heartbeat` | Hash + TTL | Worker liveness record |
+| `yolo:metrics:global` | Hash | Done count, failed count, accumulated latency, last task |
+| `yolo:metrics:worker:done` | Hash | Done task count per worker |
+| `yolo:metrics:worker:failed` | Hash | Failed task count per worker |
+| `yolo:metrics:recent:done` | ZSet | Recently completed tasks for recent-window QPS |
 
 Redis Stream commands used by the service:
 
@@ -427,7 +560,39 @@ Task state machine:
 ```text
 queued -> running -> done
 queued -> running -> failed
+queued/running -> pending -> reclaimed -> running -> done
 ```
+
+Task acknowledgement rule:
+
+```text
+markDone/markFailed succeeds -> XACK -> optionally delete input image
+markDone/markFailed fails    -> no XACK -> keep input image -> allow XAUTOCLAIM recovery
+```
+
+## Logs
+
+Phase 8.5 uses spdlog:
+
+```text
+logs/server.log
+logs/worker.log
+```
+
+Check logs:
+
+```powershell
+Get-ChildItem .\logs
+Get-Content .\logs\server.log -Tail 20
+Get-Content .\logs\worker.log -Tail 20
+```
+
+Expected split:
+
+| File | Main contents |
+|---|---|
+| `server.log` | Server startup, Redis producer/query, async task submission, API information |
+| `worker.log` | Worker startup, Redis configuration, TensorRT engine loading, labels loading, worker start |
 
 ## Benchmark
 
@@ -440,49 +605,37 @@ tools/benchmark_async.py
 Standard benchmark:
 
 ```powershell
-python tools\benchmark_async.py --url http://127.0.0.1:8080 --image D:/tensorrtx/yolo11/images/bus.png --tasks 1000 --concurrency 10 --timeout 240
+python .\tools\benchmark_async.py `
+  --url http://127.0.0.1:8080 `
+  --image D:/tensorrtx/yolo11/images/bus.png `
+  --tasks 1000 `
+  --concurrency 10
 ```
 
-High-pressure benchmark:
+Phase 8.5 verified result:
 
-```powershell
-python tools\benchmark_async.py --url http://127.0.0.1:8080 --image D:/tensorrtx/yolo11/images/bus.png --tasks 1000 --concurrency 20 --timeout 300
-```
+| Scenario | Submitted | Done/Failed/Timeout | QPS | avg total_ms | avg queue_wait_ms | avg inference_ms | Worker distribution |
+|---|---:|---:|---:|---:|---:|---:|---|
+| 1000 tasks / concurrency=10 | 1000/1000 | 1000/0/0 | 59.177 | 272.631 ms | 251.634 ms | 4.335 ms | 334 / 335 / 331 |
 
-Extreme stream-trimming validation:
-
-```powershell
-python tools\benchmark_async.py --url http://127.0.0.1:8080 --image D:/tensorrtx/yolo11/images/bus.png --tasks 3000 --concurrency 20 --timeout 300
-```
-
-Verified results with `worker_num=3`:
-
-| Tasks | Concurrency | Done/Failed/Timeout | QPS | avg total_ms | avg queue_wait_ms | avg inference_ms |
-|---:|---:|---:|---:|---:|---:|---:|
-| 500 | 5 | 500/0/0 | 34.424 | 3756.384 | 3729.490 | 7.529 |
-| 1000 | 10 | 1000/0/0 | 34.545 | 8165.548 | 8139.791 | 7.035 |
-| 1000 | 20 | 1000/0/0 | 33.784 | 8542.974 | 8514.400 | 8.937 |
-
-Current stable throughput is about **33-35 QPS** with `worker_num=3`. Increasing client concurrency beyond 10 does not significantly improve throughput; it mainly increases queue waiting time.
-
-Extreme test result:
+Final Redis validation:
 
 ```text
-Tasks: 3000
-Concurrency: 20
-Submitted ok: 2999/3000
-Done/Failed/Timeout: 2975/0/24
-redis_stream_len: 10012
-redis_pending: 0
+XPENDING = 0
+worker_1 pending = 0
+worker_2 pending = 0
+worker_3 pending = 0
+XLEN = 10000
+Redis used_memory ≈ 53 MB
 ```
 
-This confirms that `XTRIM MAXLEN ~ 10000` works and pending tasks can be recovered, but it also exposes Redis connection pressure under extreme load.
+`queue_wait_ms` is much larger than `inference_ms`, which means the bottleneck is mainly queueing/service-chain overhead rather than TensorRT inference.
 
 ## Troubleshooting
 
 ### `Cannot open engine file`
 
-Check `config/server.yaml`:
+Check `config/server.yaml` or `config/worker.yaml`:
 
 ```yaml
 engine_path: "D:/tensorrtx/yolo11/engines/yolo11n.engine"
@@ -490,19 +643,48 @@ engine_path: "D:/tensorrtx/yolo11/engines/yolo11n.engine"
 
 Make sure the file exists. Do not confuse `engine/` with `engines/`.
 
-### `kNumClass` is wrong
+### `labels_loaded=false`
 
-For COCO detection, startup logs should show:
+Check:
 
-```text
-kNumClass = 80
+```powershell
+Test-Path D:\tensorrtx\yolo11\labels\coco.txt
 ```
 
-If it shows `16`, the project is configured for OBB/DOTA. Update `include/config.h`, rebuild, and regenerate the engine.
+The `labels_path` in both server and worker configuration should point to the same label file.
+
+### Synchronous detection returns unavailable
+
+In production mode, the HTTP server may run with:
+
+```yaml
+server:
+  enable_sync_detect: false
+```
+
+Use `/api/v1/detect/image/async` instead, or enable sync detection only for local debugging.
+
+### Async submission returns HTTP 503
+
+Check readiness:
+
+```powershell
+curl.exe "http://127.0.0.1:8080/api/v1/ready"
+```
+
+Common reasons:
+
+```text
+not enough alive workers
+redis memory limit exceeded
+redis ping failed
+```
+
+Start workers and wait a few seconds for heartbeat keys to appear.
 
 ### Redis connects to the wrong server
 
-This project uses WSL Redis at `172.19.196.109:6379`. If Windows Redis is running on `127.0.0.1:6379`, avoid using localhost in `server.yaml`.
+This project uses WSL Redis at `172.19.196.109:6379`. If Windows Redis is running on `127.0.0.1:6379`, avoid using localhost in YAML config.
 
 Check ports and processes:
 
@@ -511,15 +693,15 @@ netstat -ano | findstr :6379
 Get-Process -Id <PID>
 ```
 
-### `ERR unknown command 'XGROUP'`
-
-The server is connected to an old or wrong Redis instance. Check Redis version:
+Check Redis version:
 
 ```bash
 redis-cli -h 172.19.196.109 -p 6379 INFO server
 ```
 
-Redis Streams and consumer groups require a Redis version that supports `XGROUP`.
+### `ERR unknown command 'XGROUP'`
+
+The server is connected to an old or wrong Redis instance. Redis Streams and consumer groups require a Redis version that supports `XGROUP`.
 
 ### `failed to connect Redis: timed out` or `connection refused`
 
@@ -538,24 +720,15 @@ Check from Windows:
 Test-NetConnection 172.19.196.109 -Port 6379
 ```
 
-If WSL IP changes, update `config/server.yaml`.
+If WSL IP changes, update `config/server.yaml` and `config/worker.yaml`.
 
-### `address in use` under extreme benchmark
+### Debug build shows Visual C++ Runtime abort popup on Ctrl+C
 
-Under `tasks=3000, concurrency=20`, Redis may report errors such as:
-
-```text
-failed to submit task to Redis
-Redis markDone failed: address in use
-Redis ackTask failed: address in use
-Redis claimPendingTask failed: address in use
-```
-
-The likely cause is frequent Redis TCP connection creation under high pressure. The next optimization is Redis connection reuse or a connection pool.
+The worker includes graceful shutdown and Windows debug popup suppression. Rebuild `yolo11_worker`, then test Ctrl+C shutdown.
 
 ### JSON bbox does not match result image
 
-The HTTP server should serialize bboxes using the same coordinate restoration logic as drawing. Check that `get_rect()` is used when converting model output to JSON.
+HTTP JSON serialization should use the same coordinate restoration logic as drawing. Check that `get_rect()` is used when converting model output to JSON.
 
 ## Git Ignore
 
@@ -590,26 +763,29 @@ Phase 2: Redis task/status/result storage
 Phase 3: Redis Stream async task queue
 Phase 4: Redis Stream multi-worker inference pool
 Phase 5: benchmark, metrics, pending reclaim, XTRIM validation
+Phase 6: Redis connection reuse and production hardening
+Phase 7: Server/Worker process split and Redis binary image storage
+Phase 8: health, readiness, Worker heartbeat, Redis image TTL, memory guard
+Phase 8.5: spdlog logging, labels_path, unified serialization, metrics API
 ```
 
 Recommended next phase:
 
 ```text
-Phase 6: Redis connection reuse and production hardening
+Phase 9: ImageStorage abstraction and storage-layer decoupling
 ```
 
 Planned improvements:
 
-- Redis long-lived connection per worker / producer
-- Reconnect strategy after Redis command failure
-- Optional Redis connection pool
-- Configurable worker task logging
-- More accurate benchmark modes
+- `ImageStorage` interface
+- `RedisImageStorage` / `LocalFileImageStorage`
 - OBB HTTP service
 - Video file async detection
 - RTSP / camera stream service
 - Multi-GPU scheduling
 - Object storage / database integration
+- Service scripts for starting/stopping server and workers
+- Docker / Linux deployment path
 
 ## Acknowledgement
 
