@@ -39,6 +39,7 @@ namespace yolo11_server {
         crow::response handleStreamStop(const std::string& stream_id) const;
         crow::response handleStreamStatus(const std::string& stream_id) const;
         crow::response handleStreamSnapshot(const std::string& stream_id) const;
+        bool tryCleanupStaleActiveStream(nlohmann::json* cleanup_json, std::string& error) const;
         crow::response handleImageAsync(const crow::request& request, const std::string& expected_model_type);
         crow::response handleGetAsyncResult(const std::string& task_id) const;
         crow::response handleGetVideoResult(const std::string& task_id) const;

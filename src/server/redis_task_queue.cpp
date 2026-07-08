@@ -1443,17 +1443,93 @@ namespace yolo11_server {
         return expireKey(context_, streamTaskMetaKey(stream_id), ttl, error);
     }
 
-    bool RedisTaskQueue::markStreamStopped(const std::string& stream_id, long long stop_time_ms, long long frame_count, std::string& error) const {
+    bool RedisTaskQueue::markStreamStopped(const std::string& stream_id,
+        long long stop_time_ms,
+        long long frame_count,
+        std::string& error) const {
         std::lock_guard<std::mutex> lock(context_mutex_);
         const int ttl = taskTtlSeconds(config_);
+
         RedisReplyPtr meta_reply = commandWithReconnectLocked(config_, context_, error, 10000,
-            "HSET %s status %s stop_time_ms %lld frame_count %lld stop_requested %s no_frame_count %d last_update_ms %lld",
-            streamTaskMetaKey(stream_id).c_str(), "stopped", stop_time_ms, frame_count, "0", 0, stop_time_ms);
+            "HSET %s status %s stop_time_ms %lld frame_count %lld last_update_ms %lld",
+            streamTaskMetaKey(stream_id).c_str(),
+            "stopped",
+            stop_time_ms,
+            frame_count,
+            stop_time_ms);
         if (replyIsError(meta_reply.get(), error, context_)) return false;
+
         if (!expireKey(context_, streamTaskMetaKey(stream_id), ttl, error)) return false;
+
         RedisReplyPtr status_reply = commandWithReconnectLocked(config_, context_, error, 10000,
-            "SETEX %s %d %s", streamTaskStatusKey(stream_id).c_str(), ttl, "stopped");
+            "SETEX %s %d %s",
+            streamTaskStatusKey(stream_id).c_str(),
+            ttl,
+            "stopped");
         if (replyIsError(status_reply.get(), error, context_)) return false;
+
+        // Phase 14.5 stream metrics hotfix:
+        // stream 任务是长生命周期任务，进入 running 后已 XACK，不能依赖普通队列 done 统计。
+        // 所以在 stopped 终态这里累计 done_count。
+        if (config_.metrics_enabled) {
+            std::string metrics_error;
+            std::string consumer_name;
+
+            RedisReplyPtr consumer_reply = commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HGET %s consumer_name",
+                streamTaskMetaKey(stream_id).c_str());
+
+            if (consumer_reply &&
+                consumer_reply->type != REDIS_REPLY_NIL &&
+                consumer_reply->type != REDIS_REPLY_ERROR) {
+                consumer_name = replyString(consumer_reply.get());
+            }
+
+            const std::string global_key = metricsGlobalKey();
+            const std::string worker_done_key = metricsWorkerDoneKey();
+            const std::string recent_key = metricsRecentDoneKey();
+
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HINCRBY %s done_count 1",
+                global_key.c_str());
+
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HSET %s last_task_id %s last_finish_time_ms %lld",
+                global_key.c_str(),
+                stream_id.c_str(),
+                stop_time_ms);
+
+            if (!consumer_name.empty()) {
+                commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                    "HINCRBY %s %s 1",
+                    worker_done_key.c_str(),
+                    consumer_name.c_str());
+            }
+
+            const std::string recent_member = stream_id + ":" + std::to_string(stop_time_ms);
+
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "ZADD %s %lld %s",
+                recent_key.c_str(),
+                stop_time_ms,
+                recent_member.c_str());
+
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "EXPIRE %s %d",
+                global_key.c_str(),
+                config_.metrics_ttl_seconds);
+
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "EXPIRE %s %d",
+                worker_done_key.c_str(),
+                config_.metrics_ttl_seconds);
+
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "EXPIRE %s %d",
+                recent_key.c_str(),
+                config_.metrics_ttl_seconds);
+        }
+
         return releaseActiveStreamIfMatchedLocked(config_, context_, activeStreamTaskKey(), stream_id, error);
     }
 
@@ -1468,6 +1544,42 @@ namespace yolo11_server {
         RedisReplyPtr status_reply = commandWithReconnectLocked(config_, context_, error, 10000,
             "SETEX %s %d %s", streamTaskStatusKey(stream_id).c_str(), ttl, "failed");
         if (replyIsError(status_reply.get(), error, context_)) return false;
+
+        // Phase 14.5 stream metrics hotfix:
+        // failed 终态也要累计，包括无效 camera、RTSP 打不开、重连耗尽、stale cleanup。
+        if (config_.metrics_enabled) {
+            std::string metrics_error;
+            std::string consumer_name;
+
+            RedisReplyPtr consumer_reply = commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HGET %s consumer_name", streamTaskMetaKey(stream_id).c_str());
+
+            if (consumer_reply && consumer_reply->type != REDIS_REPLY_NIL && consumer_reply->type != REDIS_REPLY_ERROR) {
+                consumer_name = replyString(consumer_reply.get());
+            }
+
+            const std::string global_key = metricsGlobalKey();
+            const std::string worker_failed_key = metricsWorkerFailedKey();
+
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HINCRBY %s failed_count 1", global_key.c_str());
+
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HSET %s last_task_id %s last_finish_time_ms %lld",
+                global_key.c_str(), stream_id.c_str(), stop_time_ms);
+
+            if (!consumer_name.empty()) {
+                commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                    "HINCRBY %s %s 1", worker_failed_key.c_str(), consumer_name.c_str());
+            }
+
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "EXPIRE %s %d", global_key.c_str(), config_.metrics_ttl_seconds);
+
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "EXPIRE %s %d", worker_failed_key.c_str(), config_.metrics_ttl_seconds);
+        }
+
         return releaseActiveStreamIfMatchedLocked(config_, context_, activeStreamTaskKey(), stream_id, error);
     }
 

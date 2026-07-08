@@ -281,6 +281,7 @@ namespace yolo11_server {
         bool markStreamRunning(const std::string& stream_id, int width, int height, double fps, long long start_time_ms, int worker_id, const std::string& consumer_name, std::string& error) const;
         bool markStreamReconnecting(const std::string& stream_id, const std::string& reason, int reconnect_count, int no_frame_count, long long update_time_ms, std::string& error) const;
         bool updateStreamLatest(const std::string& stream_id, const std::string& latest_snapshot_path, long long frame_count, double fps, int width, int height, int last_num_detections, long long update_time_ms, std::string& error) const;
+        bool refreshStreamLease(const std::string& stream_id, std::string& error) const;
         bool markStreamStopped(const std::string& stream_id, long long stop_time_ms, long long frame_count, std::string& error) const;
         bool markStreamFailed(const std::string& stream_id, const std::string& error_message, long long stop_time_ms, long long frame_count, std::string& error) const;
         bool requestStopStreamTask(const std::string& stream_id, std::string& error) const;
