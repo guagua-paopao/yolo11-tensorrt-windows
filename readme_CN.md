@@ -1,6 +1,6 @@
 # YOLO11 TensorRT Windows
 
-本项目用于在 Windows 平台部署 YOLO11 TensorRT 推理，支持 Visual Studio 2019、CUDA、TensorRT 10、OpenCV、可复用 C++ Runtime API、纯 C++ HTTP 图片检测服务、Redis Stream 异步任务队列、Server / Worker 独立进程部署，以及当前已经跑通的 Phase 12 Detect + OBB 双服务并行部署。项目目前已经支持 Detection 与 OBB 两类模型的异步图片服务化，具备 Worker 心跳、ready 检查、Redis Binary 图片存储、TTL 清理、Pending 恢复、日志、labels_path、metrics、多模型 Runner 抽象和双服务并行压测验证。
+本项目用于在 Windows 平台部署 YOLO11 TensorRT 推理，支持 Visual Studio 2019、CUDA、TensorRT 10、OpenCV、可复用 C++ Runtime API、纯 C++ HTTP 图片检测服务、Redis Stream 异步任务队列、Server / Worker 独立进程部署。当前项目已经推进到 Phase 15，支持 Detection 图片异步服务、OBB 图片异步服务、Detect + OBB 双服务并行部署、Detect 视频文件异步检测服务、单路 RTSP / 摄像头 / 本地文件流任务服务化，以及 Detect / OBB / Video / Stream 四类 Worker 的能力注册与统一观测。项目已经具备 Worker 心跳、ready 检查、Redis Binary 图片存储、视频本地文件存储、流任务状态管理、最新帧 snapshot 输出、TTL 清理、Pending 恢复、日志、labels_path、metrics、多模型 Runner 抽象、视频任务进度、取消、异常输入拒绝、Worker 恢复、重复启动保护、流任务重连失败处理、批量压测、统一 runtime 目录管理，以及 `model_type / runner_model_type / worker_group / worker_kind / task_kind / stream_type / gpu_id` 等 Worker capability 字段。
 
 这个 README 中文版主要用于记录项目演进过程、踩坑原因、修改逻辑和阶段性反思。
 
@@ -9,8 +9,10 @@
 当前项目已经完成：
 
 ```text
-Phase 12.0：Detect + OBB 双服务并行部署
+Phase 15：Worker / 模型 / 任务类型能力注册与统一观测
 ```
+最终补充说明：当前 Phase 15 已完成 Detect / OBB / Video / Stream 四类服务的 Worker Capability Registry。`/health`、`/ready`、`/workers`、`/metrics` 已能按 `model`、`task_kind`、`worker_group`、`worker_kind`、`stream_type`、`gpu_id` 等维度过滤和观测 Worker。四类服务均已完成真实任务验证：Detect 图片任务 done，OBB 图片任务 done，Video 文件任务 done 并可下载结果视频，Stream 摄像头流完成 start / snapshot / stop / metrics。最终四条 Redis Stream 均 `XPENDING=0`。
+
 
 已经验证通过的能力：
 
@@ -78,17 +80,60 @@ Phase 12.0：Detect + OBB 双服务并行部署
 - Phase 12.0 Detect + OBB 独立 Worker：`worker_1` 与 `obb_worker_1` 同时在线
 - Phase 12.0 双服务 smoke test：Detect 与 OBB 均可提交、查询和下载结果图
 - Phase 12.0 双服务 benchmark：Detect 50/50 done，OBB 50/50 done，failed=0，timeout=0，QPS≈31.866
+- Phase 13.0 Detect 视频文件异步服务最小闭环：新增 `POST /api/v1/detect/video/async`
+- Phase 13.0 视频任务查询：新增 `GET /api/v1/video/result/{task_id}`，支持 `queued/running/done/failed` 状态查询
+- Phase 13.0 结果视频下载：新增 `GET /api/v1/video/result/{task_id}/file`
+- Phase 13.0 视频任务独立队列：`yolo:stream:video:detect` + `yolo11_video_detect_group`
+- Phase 13.0 视频 Worker：新增 `yolo11_video_worker.exe`，负责逐帧读取视频、调用 Detect Runner、绘制检测框并写出结果视频
+- Phase 13.0 视频存储策略：视频不放 Redis Binary，采用本地文件保存；Redis 只保存任务状态、进度、路径、耗时和结果元信息
+- Phase 13.5 视频取消：新增 `POST /api/v1/video/result/{task_id}/cancel`，支持 running 任务取消
+- Phase 13.5 视频清理：新增 `POST /api/v1/video/result/{task_id}/cleanup`，用于删除已完成任务的本地 input/output 视频文件
+- Phase 13.5 异常输入测试：非法视频 HTTP 400 拒绝，`VIDEO_OPEN_FAILED`，不会进入 Worker
+- Phase 13.5 视频批量压测：20 tasks / concurrency=2，done=20，failed=0，timeout=0
+- Phase 13.5 Worker 恢复测试：提交 3 个视频任务，中断并重启 Worker 后全部 done
+- Phase 13.5 Redis 验收：`XPENDING=0`，`video_worker_1 pending=0`
+- 项目结构整理：config 根目录只保留当前配置，旧 phase YAML 归档到 `config/archive/legacy_phase_configs/`
+- runtime 目录统一：Detect / OBB / Video 的 input、output、logs 统一归入 `runtime/`
+- Phase 14.0 单路流任务最小闭环：新增 `POST /api/v1/stream/start`
+- Phase 14.0 流任务状态查询：新增 `GET /api/v1/stream/{stream_id}/status`
+- Phase 14.0 最新帧截图访问：新增 `GET /api/v1/stream/{stream_id}/snapshot`
+- Phase 14.0 流任务停止：新增 `POST /api/v1/stream/{stream_id}/stop`
+- Phase 14.0 新增 `yolo11_stream_worker.exe`，负责打开 camera/file/RTSP source、逐帧推理、写出最新 snapshot
+- Phase 14.0 流任务独立队列：`yolo:stream:live:detect` + `yolo11_stream_detect_group`
+- Phase 14.0 流任务本地 snapshot 存储：`runtime/output/streams/{stream_id}/snapshot.jpg`
+- Phase 14.0 本地摄像头测试通过：`camera_id=0`，`running -> snapshot -> stopped`，Redis `XPENDING=0`
+- Phase 14.5 重复启动保护：已有 active stream 时再次 start 返回 HTTP 409，`STREAM_ALREADY_ACTIVE`
+- Phase 14.5 新增流任务重连状态：`reconnecting`，并记录 `reconnect_count`、`no_frame_count`、`last_error`
+- Phase 14.5 无效摄像头测试：`camera_id=99` 触发 3 次重连后进入 `failed`
+- Phase 14.5 稳定性脚本：`tools/phase14_5_stream_stability_test.py`
+- Phase 14.5 三轮 start / snapshot / stop 测试通过，Worker 最终回到 `idle`
+- Phase 14.5 Redis 验收：`XPENDING=0`，`stream_worker_1 pending=0`，active key 为 `nil`
+- Phase 14.5 状态语义统一：`/stream/start` 最终返回 `status=queued`、`lifecycle_status=queued`，旧日志里的 `created` 仅作为历史记录保留
+- Phase 14.5 stale stream cleanup：Worker 崩溃或 active lock 残留时，Server 可根据 heartbeat/current_task_id/last_update_ms 判断 stale 并释放单活锁
+- Phase 14.5 stream metrics 验收：正常 camera stop 后 `done_count+1`，无效 camera failed 后 `failed_count+1`，`/metrics?model=stream` 返回 `metrics_found=true`
+- Phase 15 Worker Capability Registry：新增统一 Worker 能力声明，用于描述 Worker 能处理什么任务、属于哪个分组、绑定哪个 GPU、当前状态是什么
+- Phase 15 heartbeat 字段扩展：新增 `model_type`、`runner_model_type`、`worker_group`、`worker_kind`、`task_kind`、`stream_type`、`engine_path`、`labels_path`、`max_concurrency`
+- Phase 15 `/workers` 过滤增强：支持 `?model=detect/obb/video/stream`、`?task_kind=image_async/video_file/live_stream`、`?worker_group=...`
+- Phase 15 `/ready` 过滤增强：可按 `worker_group` 判断某一类服务是否可接收任务
+- Phase 15 `/metrics` 维度增强：metrics 返回 `models.detect/obb/video/stream` 分组，并携带 `worker_group`、`worker_kind`、`task_kind`、`stream_type`
+- Phase 15 Detect 验收：8080 `model_type=detect`、`runner_model_type=detect`、`worker_group=image_detect_gpu0`、异步图片任务 done、结果图可下载、`XPENDING=0`
+- Phase 15 OBB 验收：8081 `model_type=obb`、`runner_model_type=obb`、`worker_group=image_obb_gpu0`、OBB 图片任务 done、结果图可下载、`XPENDING=0`
+- Phase 15 Video 验收：8082 `model_type=video`、`runner_model_type=detect`、`worker_group=video_detect_gpu0`、视频任务 done、结果视频可下载、`XPENDING=0`
+- Phase 15 Stream 验收：8083 `model_type=stream`、`runner_model_type=detect`、`worker_group=stream_detect_gpu0`、`task_kind=live_stream`、`stream_type=long_running_stream`、camera stream stopped、snapshot 可下载、metrics `total_done=1`、`XPENDING=0`
+- Phase 15 修复 Video heartbeat 语义：Video Worker 对外应声明 `model_type=video`，底层推理模型为 `runner_model_type=detect`
+- Phase 15 修复 Stream API 语义：`/stream/start` 和 `/stream/status` 的对外 `task_kind` 统一为 `live_stream`
+
 
 当前还没有做：
 
-- 视频文件异步检测接口
-- 视频任务进度、取消、结果视频下载
-- RTSP / 摄像头流服务化接口
+- 多路 RTSP / 摄像头并发流管理
+- WebSocket / SSE 实时推送检测结果
 - 多 GPU / 多模型 Worker 调度
-- ImageStorage 抽象层（当前 Redis Binary 仍然是主要实现，后续可拆出 `RedisImageStorage` / `LocalFileImageStorage` / 对象存储）
-- 启停脚本、服务守护、Prometheus 指标、Docker / Linux 部署路径
+- ImageStorage / VideoStorage 抽象层（当前图片主要使用 Redis Binary，视频主要使用 LocalFile）
+- Prometheus 指标、服务守护、Docker / Linux 部署路径
+- 更严格的长视频压测、磁盘空间保护和历史任务清理策略
 
-当前开发原则是：**先保持 detect + OBB 双模型图片异步服务稳定，再进入视频文件异步检测；视频、RTSP、多 GPU、对象存储和生产运维能力继续后置，避免在基础链路还没沉淀清楚时过度扩张。**
+当前开发原则是：**Detect 图片、OBB 图片、Detect 视频文件异步服务和单路流任务服务已经形成稳定基础；下一阶段进入 Worker / 模型调度增强之前，优先保证配置、目录、脚本、Redis 状态和测试入口足够清晰，避免服务类型增多后工程结构失控。**
 
 ---
 
@@ -121,6 +166,19 @@ Phase 12.0：Detect + OBB 双服务并行部署
   - 压测统计与 worker 分布统计
   - Worker 强杀恢复测试
   - Debug 版本 Ctrl+C 优雅退出与弹窗抑制
+  - 独立 `yolo11_stream_worker.exe` 处理实时流任务
+  - 流任务 start / stop / status / snapshot 管理
+  - 单活流保护，避免单 Worker 下重复 start 造成任务堆积
+  - 断流 / 打开失败后进入 reconnecting，并在最大重连次数后 failed
+  - 最新检测帧 snapshot 本地保存与 HTTP 下载
+  - Phase 14.5 稳定性自动测试脚本
+  - Phase 14.5 source matrix 测试脚本：验证 file / camera / RTSP 输入路径
+  - Phase 14.5 stream metrics 测试脚本：验证 stopped/failed 终态统计写入 Redis
+  - Phase 15 Worker Capability Registry：统一描述 Detect / OBB / Video / Stream Worker 能力
+  - Phase 15 `/workers` / `/ready` / `/metrics` 支持能力过滤
+  - Worker heartbeat 中包含 `model_type`、`runner_model_type`、`worker_group`、`worker_kind`、`task_kind`、`stream_type`、`gpu_id`
+  - 支持按 `worker_group=image_detect_gpu0/image_obb_gpu0/video_detect_gpu0/stream_detect_gpu0` 进行就绪检查
+  - 支持区分外部服务类型与内部推理模型，例如 `model_type=video`、`runner_model_type=detect`
 
 ---
 
@@ -269,8 +327,57 @@ yolo11-tensorrt-windows
 - `api/*.cpp` 是 C++ Runtime API
 - `examples/*.cpp` 是 API 使用示例
 - `yolo11_det.cpp` / `yolo11_obb.cpp` 是原始命令行程序
-- `output/` 是运行时输出目录，不应该提交
+- 旧版 `output/`、`temp/`、`logs/` 已逐步迁移到统一的 `runtime/` 目录
 - `engine/` 或 `engines/` 目录里的 `.engine` 不应该提交
+
+当前 Phase 14.5 之后推荐的运行目录结构：
+
+```text
+yolo11/
+├── config/
+│   ├── server.yaml
+│   ├── server_detect.yaml
+│   ├── worker_detect.yaml
+│   ├── server_obb.yaml
+│   ├── worker_obb.yaml
+│   ├── server_video.yaml
+│   ├── worker_video.yaml
+│   ├── server_stream.yaml
+│   ├── worker_stream.yaml
+│   └── archive/
+│       └── legacy_phase_configs/
+├── runtime/
+│   ├── input/
+│   │   ├── images/detect/
+│   │   ├── images/obb/
+│   │   └── videos/detect/
+│   ├── output/
+│   │   ├── images/detect/
+│   │   ├── images/obb/
+│   │   ├── videos/detect/
+│   │   └── streams/
+│   └── logs/
+│       ├── detect/server/
+│       ├── detect/worker/
+│       ├── obb/server/
+│       ├── obb/worker/
+│       ├── video/server/
+│       ├── video/worker/
+│       ├── stream/server/
+│       └── stream/worker/
+├── scripts/
+│   ├── start_detect_server.ps1
+│   ├── start_detect_worker.ps1
+│   ├── start_obb_server.ps1
+│   ├── start_obb_worker.ps1
+│   ├── start_video_server.ps1
+│   ├── start_video_worker.ps1
+│   ├── stop_all_services.ps1
+│   ├── clean_video_redis.ps1
+│   └── clean_runtime_files.ps1
+```
+
+这次目录整理的原则是：`config/` 只放当前要用的配置，历史配置归档；运行时产生的输入、输出和日志统一放入 `runtime/`，避免 `temp/`、`output/`、`logs/` 和各阶段目录混杂。
 
 ---
 
@@ -278,7 +385,7 @@ yolo11-tensorrt-windows
 
 | 任务 | 原始命令行程序 | C++ API 封装 | Demo 程序 | HTTP 服务 | 状态 |
 |---|---|---|---|---|---|
-| Detection | `yolo11_det.exe` | `Yolo11Detector` | `demo_image.exe`, `demo_video.exe` | 同步 + Redis 异步 + 多 Worker | 已支持 |
+| Detection | `yolo11_det.exe` | `Yolo11Detector` | `demo_image.exe`, `demo_video.exe` | 同步 + Redis 异步 + 多 Worker + 视频文件异步服务 + 单路流服务 | 已支持 |
 | OBB | `yolo11_obb.exe` | `Yolo11ObbDetector` | `demo_obb_image.exe` | 异步 HTTP 服务 + 独立 Worker + 双服务并行 | Phase 10-12 已验证 |
 | Classification | 源码已有 | 计划封装 | 计划添加 | 后续计划 | 暂未封装 |
 | Segmentation | 源码已有 | 计划封装 | 计划添加 | 后续计划 | 暂未封装 |
@@ -411,6 +518,8 @@ demo_video
 demo_obb_image
 yolo11_server
 yolo11_worker
+yolo11_video_worker
+yolo11_stream_worker
 ```
 
 运行时必须有：
@@ -444,6 +553,8 @@ yolo11_obb
 yolo11_runtime
 yolo11_server
 yolo11_worker
+yolo11_video_worker
+yolo11_stream_worker
 ```
 
 这样会导致 `src/server/*.cpp` 被编进原来的 `yolo11_det`、`yolo11_obb`，产生莫名其妙的编译错误。
@@ -615,6 +726,55 @@ yolo11_det.exe -d yolo11n.engine D:\tensorrtx\yolo11\images c
 
 结果会保存到当前可执行文件目录。
 
+
+### Stream 实时流服务
+
+```powershell
+cd D:\tensorrtx\yolo11
+
+cmake --build out\build\x64-Debug --config Debug --target yolo11_server
+cmake --build out\build\x64-Debug --config Debug --target yolo11_stream_worker
+
+# 窗口 1：Stream Server
+.\out\build\x64-Debug\yolo11_server.exe .\config\server_stream.yaml
+
+# 窗口 2：Stream Worker
+.\out\build\x64-Debug\yolo11_stream_worker.exe .\config\worker_stream.yaml --consumer-name stream_worker_1
+
+# 窗口 3：检查
+curl.exe "http://127.0.0.1:8083/api/v1/health"
+curl.exe "http://127.0.0.1:8083/api/v1/ready"
+curl.exe "http://127.0.0.1:8083/api/v1/workers"
+
+# 推荐用脚本测试
+python tools\phase14_5_stream_stability_test.py `
+  --url http://127.0.0.1:8083 `
+  --source-type camera `
+  --camera-id 0 `
+  --repeat 3 `
+  --run-seconds 5
+```
+
+进一步验证 stopped / failed 终态 metrics：
+
+```powershell
+python tools\phase14_5_stream_metrics_check.py `
+  --url http://127.0.0.1:8083 `
+  --camera-id 0 `
+  --invalid-camera-id 99 `
+  --run-seconds 3 `
+  --wait-seconds 30
+```
+
+期望：
+
+```text
+PASS Phase 14.5 stream metrics check
+total_tasks_done = 1
+total_tasks_failed = 1
+```
+
+
 ### OBB
 
 对图片文件夹进行 OBB 推理：
@@ -755,7 +915,9 @@ Phase 8.5：Server / Worker 分离 + Redis Binary 图片存储 + 健康检查 + 
 ```powershell
 cd D:\tensorrtx\yolo11
 cmake --build out\build\x64-Debug --config Debug --target yolo11_server
-yolo11_worker
+cmake --build out\build\x64-Debug --config Debug --target yolo11_worker
+cmake --build out\build\x64-Debug --config Debug --target yolo11_video_worker
+cmake --build out\build\x64-Debug --config Debug --target yolo11_stream_worker
 ```
 
 ### 启动 server
@@ -2912,6 +3074,1408 @@ obb_worker_1 pending = 0
 10. Phase 12 之后，项目已经具备 Detect + OBB 双模型图片服务基础，下一步再进入视频服务才更稳。
 
 
+## Phase 13 / 13.5：Detect 视频文件异步检测、稳定性增强与目录结构整理
+
+### 阶段总定位
+
+Phase 13 是从“图片异步服务”进入“视频文件异步服务”的阶段。前面 Phase 12 已经完成 Detect + OBB 双服务并行，说明图片任务的 Server / Worker、Redis Stream、心跳、ready、metrics、labels 和结果图下载都比较稳定。Phase 13 的目标不是一上来做 RTSP，而是先做更可控的视频文件异步任务。
+
+这几个阶段可以概括为：
+
+```text
+Phase 13.0：Detect 视频文件异步检测最小闭环
+Phase 13.5：视频任务稳定性、取消、异常输入、Worker 恢复与批量压测
+Structure Cleanup：config 清理与 runtime 目录统一
+```
+
+核心原则是：**视频文件不放 Redis Binary，Redis 只保存任务状态和元信息；真实 input/output 视频保存在本地 runtime 目录。**
+
+---
+
+### Phase 13.0：视频文件异步检测最小闭环
+
+Phase 13.0 新增了一个独立的视频异步服务：
+
+```text
+Video Server：yolo11_server.exe + config/server_video.yaml，端口 8082
+Video Worker：yolo11_video_worker.exe + config/worker_video.yaml
+Redis Stream：yolo:stream:video:detect
+Consumer Group：yolo11_video_detect_group
+Consumer Name：video_worker_1
+```
+
+新增接口：
+
+| 方法 | 接口 | 说明 |
+|---|---|---|
+| POST | `/api/v1/detect/video/async` | 上传视频文件并提交异步检测任务 |
+| GET | `/api/v1/video/result/{task_id}` | 查询视频任务状态、进度、耗时和结果路径 |
+| GET | `/api/v1/video/result/{task_id}/file` | 下载带检测框的结果视频 |
+| POST | `/api/v1/video/result/{task_id}/cancel` | 请求取消视频任务 |
+
+视频任务状态机：
+
+```text
+queued -> running -> done
+queued -> running -> failed
+queued/running -> canceled
+```
+
+与图片任务不同，视频任务的耗时更长，所以结果查询必须包含进度字段：
+
+```text
+total_frames
+processed_frames
+progress
+fps
+width
+height
+duration_ms
+queue_wait_ms
+process_ms
+total_ms
+current_frame_index
+```
+
+### 为什么视频不放进 Redis Binary
+
+图片任务中使用 Redis Binary Key：
+
+```text
+yolo:image:{task_id}:input
+yolo:image:{task_id}:result
+```
+
+这是合理的，因为图片通常比较小，Redis TTL 可以控制内存。但是视频文件可能几十 MB、几百 MB，甚至更大。如果直接把视频 bytes 放入 Redis，会导致：
+
+```text
+Redis 内存快速膨胀
+网络传输成本增加
+大 key 影响 Redis 响应
+任务结果视频也难以长期保存
+```
+
+所以 Phase 13 采用：
+
+```text
+HTTP Server 接收视频
+↓
+保存到 runtime/input/videos/detect
+↓
+Redis Stream 只保存 task_id、input_video_path、output_video_path、视频元信息
+↓
+Video Worker 从本地路径读取视频
+↓
+逐帧推理、画框、写入结果视频
+↓
+输出到 runtime/output/videos/detect
+↓
+Redis 保存状态、进度、结果 URL 和统计信息
+```
+
+这个设计牺牲了一部分跨机器弹性，但非常适合当前 Windows 单机工程验证。后续如果要多机器部署，可以再抽象 `VideoStorage`，把本地文件替换成共享磁盘、NAS、MinIO 或 S3。
+
+### Phase 13.0 启动方式
+
+启动 Server：
+
+```powershell
+cd D:\tensorrtx\yolo11
+.\out\build\x64-Debug\yolo11_server.exe .\config\server_video.yaml
+```
+
+启动 Worker：
+
+```powershell
+cd D:\tensorrtx\yolo11
+.\out\build\x64-Debug\yolo11_video_worker.exe .\config\worker_video.yaml --consumer-name video_worker_1
+```
+
+健康检查：
+
+```powershell
+curl.exe "http://127.0.0.1:8082/api/v1/health"
+curl.exe "http://127.0.0.1:8082/api/v1/ready"
+curl.exe "http://127.0.0.1:8082/api/v1/workers"
+curl.exe "http://127.0.0.1:8082/api/v1/metrics"
+```
+
+期望看到：
+
+```text
+phase = phase13_5_video_stability_cancel_recovery
+video_enabled = true
+video_storage = local_files
+ready = true
+alive_workers = 1
+redis_pending = 0
+```
+
+提交视频任务：
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8082/api/v1/detect/video/async" `
+  -H "Content-Type: video/mp4" `
+  --data-binary "@D:/tensorrtx/yolo11/videos/test.mp4"
+```
+
+查询任务：
+
+```powershell
+curl.exe "http://127.0.0.1:8082/api/v1/video/result/<task_id>"
+```
+
+下载结果视频：
+
+```powershell
+curl.exe -o result_phase13.mp4 "http://127.0.0.1:8082/api/v1/video/result/<task_id>/file"
+```
+
+### Phase 13.0 实测结果
+
+单视频任务实测结果：
+
+```text
+task_id = video_detect_20260708_105450_576_1
+status = done
+queue_wait_ms = 2 ms
+process_ms = 1147 ms
+total_ms = 1180 ms
+total_detections = 98
+max_objects_per_frame = 2
+result video = 961 KB
+```
+
+Smoke test 结果：
+
+```text
+submit 202
+poll status=running progress=0.540541 frames=60/111
+poll status=done progress=1.0 frames=87/111
+downloaded result video: result_phase13_smoke.mp4
+```
+
+Redis 验收：
+
+```text
+XPENDING yolo:stream:video:detect yolo11_video_detect_group = 0
+video_worker_1 pending = 0
+XLEN >= 1
+```
+
+这说明 Server 入队、Video Worker 消费、逐帧推理、结果视频写出、结果查询和结果视频下载完整闭环。
+
+---
+
+### Phase 13.5：视频稳定性、取消、异常输入、Worker 恢复与批量压测
+
+Phase 13.5 在 Phase 13.0 能跑通的基础上，补齐稳定性能力。
+
+新增接口：
+
+| 方法 | 接口 | 说明 |
+|---|---|---|
+| POST | `/api/v1/video/result/{task_id}/cancel` | 请求取消 queued/running 视频任务 |
+| POST | `/api/v1/video/result/{task_id}/cleanup` | 删除完成后的本地 input/output 视频文件 |
+
+新增测试脚本：
+
+```text
+tools/phase13_5_video_invalid_input_test.py
+tools/phase13_5_video_cancel_test.py
+tools/phase13_5_video_benchmark.py
+tools/phase13_5_video_worker_recovery_test.py
+```
+
+### 异常输入测试
+
+命令：
+
+```powershell
+python tools\phase13_5_video_invalid_input_test.py `
+  --url http://127.0.0.1:8082
+```
+
+实测结果：
+
+```json
+{
+  "error": "failed to open uploaded video. Please upload a valid mp4/avi video file.",
+  "error_code": "VIDEO_OPEN_FAILED",
+  "success": false
+}
+```
+
+结论：
+
+```text
+非法视频在 HTTP 层返回 400
+不会进入 Redis Stream
+不会影响 Worker
+```
+
+反思：坏输入必须在入口尽早拒绝，不能把垃圾任务交给 Worker 处理，更不能让 Worker 因为 OpenCV 解码失败而崩溃。
+
+### 取消任务测试
+
+命令：
+
+```powershell
+python tools\phase13_5_video_cancel_test.py `
+  --url http://127.0.0.1:8082 `
+  --video D:/tensorrtx/yolo11/videos/test.mp4 `
+  --cancel-delay 0.1 `
+  --allow-fast-done
+```
+
+实测结果：
+
+```text
+cancel 200
+status = running
+poll status = canceled
+frames = 4/111
+PASS: task canceled
+```
+
+结论：running 视频任务可以被取消，Worker 会在处理过程中检查 cancel 标记，并将状态写为 `canceled`。
+
+反思：视频任务和图片任务最大区别之一是“中途可控”。图片推理太快，取消意义不大；视频是长任务，必须支持用户停止任务，避免 GPU 和磁盘继续浪费。
+
+### 批量压测
+
+命令：
+
+```powershell
+python tools\phase13_5_video_benchmark.py `
+  --url http://127.0.0.1:8082 `
+  --video D:/tensorrtx/yolo11/videos/test.mp4 `
+  --tasks 20 `
+  --concurrency 2 `
+  --output-json phase13_5_video_benchmark_20.json
+```
+
+实测结果：
+
+```json
+{
+  "tasks_requested": 20,
+  "tasks_submitted": 20,
+  "submit_errors": 0,
+  "done": 20,
+  "failed": 0,
+  "canceled": 0,
+  "timeout": 0,
+  "wall_seconds": 17.3267,
+  "qps_done": 1.1543,
+  "latency_ms": {
+    "avg_total": 8580.45,
+    "p50_total": 8963.0,
+    "p95_total": 15635.0,
+    "avg_process": 823.95,
+    "avg_queue": 7733.3
+  }
+}
+```
+
+结论：20 个视频任务全部完成，没有 failed 和 timeout。
+
+这里 `avg_queue` 远大于 `avg_process` 是正常的，因为当前只有一个 `video_worker_1`，视频任务只能串行消费。视频服务的吞吐不是单帧推理 QPS，而是“视频任务级吞吐”。如果后续要提升视频任务并发，需要增加多个 Video Worker，或者做更复杂的 GPU 调度。
+
+### Worker 恢复测试
+
+命令：
+
+```powershell
+python tools\phase13_5_video_worker_recovery_test.py `
+  --url http://127.0.0.1:8082 `
+  --video D:/tensorrtx/yolo11/videos/test.mp4 `
+  --tasks 3
+```
+
+测试过程：提交 3 个视频任务，中途强杀 `yolo11_video_worker.exe`，然后重启：
+
+```powershell
+Get-Process yolo11_video_worker | Stop-Process -Force
+
+cd D:\tensorrtx\yolo11
+.\out\build\x64-Debug\yolo11_video_worker.exe .\config\worker_video.yaml --consumer-name video_worker_1
+```
+
+实测结果：
+
+```json
+{
+  "submitted": 3,
+  "done": 3,
+  "failed": 0,
+  "canceled": 0,
+  "timeout": 0
+}
+```
+
+最终 metrics：
+
+```text
+total_tasks_done = 26
+total_tasks_failed = 0
+redis_pending = 0
+worker_distribution.video_worker_1 = 26
+```
+
+Redis 验收：
+
+```text
+XPENDING = 0
+video_worker_1 pending = 0
+XLEN = 27
+```
+
+结论：视频任务 Worker 中断后可以恢复，最终没有 Pending 残留。
+
+---
+
+### config 清理与 runtime 目录统一
+
+在 Phase 13.5 验收后，对项目目录做了一次工程整理。原因是随着阶段增多，`config/` 中历史 YAML 过多，`temp/`、`output/`、`logs/` 也开始混乱；尤其 video 输出一开始在 `temp/video/output`，没有和 Detect、OBB 统一。
+
+整理后当前配置文件：
+
+```text
+config/
+├── server.yaml
+├── server_detect.yaml
+├── worker_detect.yaml
+├── server_obb.yaml
+├── worker_obb.yaml
+├── server_video.yaml
+├── worker_video.yaml
+└── archive/
+    └── legacy_phase_configs/
+```
+
+运行时目录：
+
+```text
+runtime/
+├── input/
+│   ├── images/detect/
+│   ├── images/obb/
+│   └── videos/detect/
+├── output/
+│   ├── images/detect/
+│   ├── images/obb/
+│   └── videos/detect/
+└── logs/
+    ├── detect/server/
+    ├── detect/worker/
+    ├── obb/server/
+    ├── obb/worker/
+    ├── video/server/
+    └── video/worker/
+```
+
+目录整理后 smoke test 已验证，视频任务实际路径变成：
+
+```text
+input_video_path = ./runtime/input/videos/detect\video_detect_xxx.mp4
+output_video_path = ./runtime/output/videos/detect\video_detect_xxx_result.mp4
+download = runtime/output/videos/detect/result_structure_cleanup_smoke.mp4
+```
+
+反思：工程越往后，目录规范越重要。早期 `temp/`、`output/` 随便放没问题；但当 Detect、OBB、Video 三类服务同时存在时，必须按服务和数据类型分层，否则后面日志、结果文件、测试产物会很难追踪。
+
+---
+
+### Phase 13 / 13.5 总结反思
+
+1. 视频任务是长任务，不能照搬图片任务的“快速推理 + 立即返回”思路。
+2. Redis 很适合保存任务状态、进度和元信息，但不适合直接保存大视频文件。
+3. 视频任务必须支持 progress，否则客户端不知道任务是卡住了还是正在处理。
+4. cancel 对视频任务非常重要，它是长任务服务的基本能力。
+5. 异常视频应该在 HTTP 层拒绝，而不是进入队列污染 Worker。
+6. 单 Video Worker 下，`queue_wait_ms` 远大于 `process_ms` 是正常现象，说明瓶颈是任务排队，不是单次推理。
+7. Worker 恢复测试仍然是异步系统的底线，最终必须看 `XPENDING=0`。
+8. `processed_frames < total_frames` 不一定是 bug，OpenCV 对 MP4 的 `CAP_PROP_FRAME_COUNT` 可能是容器估计值，实际可读帧数可能更少。
+9. 目录结构整理不是“美化项目”，而是为了后续 RTSP、多 Worker、多模型和生产部署降低维护成本。
+10. Phase 13 之后，项目已经从图片异步服务进入视频异步服务，下一步做 RTSP 才有更稳的基础。
+
+### Phase 13.5 阶段结论
+
+```text
+Phase 13.5 已完成并通过验收。
+```
+
+当前系统已经支持 Detect 图片异步服务、OBB 图片异步服务和 Detect 视频文件异步服务。视频任务具备提交、查询、进度、取消、下载、清理、异常输入拒绝、Worker 恢复、metrics 和 Redis Pending 验收能力。目录结构也已经完成整理，当前配置和运行时产物都更加清晰。Phase 13.5 当时的下一阶段目标是进入 RTSP / 摄像头流服务化；该目标已在 Phase 14.0 / 14.5 中完成单路流最小闭环与稳定性增强。
+
+---
+
+
+## Phase 14 / 14.5：RTSP / 摄像头流任务最小闭环与稳定性增强
+
+### 阶段总定位
+
+Phase 14 是从“视频文件异步任务”进入“实时流任务管理”的阶段。Phase 13 处理的是有限长度的视频文件，任务会自然结束；Phase 14 处理的是持续输入的视频流，任务不会自动结束，因此必须新增流任务生命周期管理。
+
+这两个阶段可以概括为：
+
+```text
+Phase 14.0：RTSP / 摄像头流任务最小闭环
+Phase 14.5：流任务稳定性增强、重复启动保护与重连失败处理
+```
+
+Phase 14 的核心不是一次性做完整视频平台，而是先验证单路流的生命周期：
+
+```text
+start -> created -> starting -> running -> snapshot -> stopping -> stopped
+```
+
+Phase 14.5 则进一步补齐：
+
+```text
+重复 start 保护
+打开失败 / 断流重连
+无效 source 最终 failed
+Worker 空闲恢复
+Redis active key 清理
+XPENDING 验收
+```
+
+---
+
+### Phase 14.0：单路流任务最小闭环
+
+Phase 14.0 新增独立流服务：
+
+```text
+Stream Server：yolo11_server.exe + config/server_stream.yaml，端口 8083
+Stream Worker：yolo11_stream_worker.exe + config/worker_stream.yaml
+Redis Stream：yolo:stream:live:detect
+Consumer Group：yolo11_stream_detect_group
+Consumer Name：stream_worker_1
+Snapshot 目录：runtime/output/streams/{stream_id}/snapshot.jpg
+```
+
+新增接口：
+
+| 方法 | 接口 | 说明 |
+|---|---|---|
+| POST | `/api/v1/stream/start` | 启动一个 camera / file / rtsp 流任务 |
+| GET | `/api/v1/stream/{stream_id}/status` | 查询流任务状态、帧数、FPS、错误、重连次数 |
+| GET | `/api/v1/stream/{stream_id}/snapshot` | 下载最新画框后的 JPEG 帧 |
+| POST | `/api/v1/stream/{stream_id}/stop` | 请求停止流任务并释放 VideoCapture |
+
+Phase 14.0 的数据流：
+
+```text
+Client
+  -> POST /api/v1/stream/start
+  -> Server 创建 stream_id
+  -> 写入 Redis stream start command
+  -> 写 yolo:streamtask:{stream_id}:status/meta/latest
+  -> Stream Worker XREADGROUP 领取任务
+  -> 打开 VideoCapture(camera/file/rtsp)
+  -> 逐帧读取
+  -> Detect Runner 推理
+  -> draw 后覆盖写 snapshot.jpg
+  -> 更新 frame_count / fps / last_num_detections / latest_snapshot_path
+  -> Client 查询 status 或下载 snapshot
+  -> POST stop
+  -> Worker 检测 stop_requested
+  -> 释放 VideoCapture
+  -> status=stopped
+```
+
+### Phase 14.0 启动方式
+
+启动 Stream Server：
+
+```powershell
+cd D:\tensorrtx\yolo11
+.\out\build\x64-Debug\yolo11_server.exe .\config\server_stream.yaml
+```
+
+启动 Stream Worker：
+
+```powershell
+cd D:\tensorrtx\yolo11
+.\out\build\x64-Debug\yolo11_stream_worker.exe .\config\worker_stream.yaml --consumer-name stream_worker_1
+```
+
+健康检查：
+
+```powershell
+curl.exe "http://127.0.0.1:8083/api/v1/health"
+curl.exe "http://127.0.0.1:8083/api/v1/ready"
+curl.exe "http://127.0.0.1:8083/api/v1/workers"
+```
+
+期望看到：
+
+```text
+phase = phase14_5_stream_stability_reconnect
+stream_enabled = true
+ready = true
+alive_workers = 1
+stream_worker_1 alive = true
+redis_pending = 0
+```
+
+### PowerShell 中提交 JSON 的推荐方式
+
+直接写：
+
+```powershell
+$body = '{"source_type":"camera","camera_id":0}'
+curl.exe -X POST ... -d $body
+```
+
+可能会出现 JSON 引号被 PowerShell 处理掉，导致后端返回：
+
+```json
+{
+  "error_code": "INVALID_JSON"
+}
+```
+
+最稳的方式是先写 JSON 文件，再用 `--data-binary` 上传：
+
+```powershell
+@'
+{
+  "source_type": "camera",
+  "camera_id": 0
+}
+'@ | Set-Content -Encoding utf8 .\stream_start_camera.json
+
+curl.exe -X POST "http://127.0.0.1:8083/api/v1/stream/start" `
+  -H "Content-Type: application/json" `
+  --data-binary "@stream_start_camera.json"
+```
+
+返回示例：
+
+```json
+{
+  "success": true,
+  "stream_id": "stream_detect_20260708_135555_612_1",
+  "status": "created",
+  "source_type": "camera",
+  "camera_id": 0,
+  "status_url": "/api/v1/stream/stream_detect_20260708_135555_612_1/status",
+  "snapshot_url": "/api/v1/stream/stream_detect_20260708_135555_612_1/snapshot",
+  "stop_url": "/api/v1/stream/stream_detect_20260708_135555_612_1/stop"
+}
+```
+
+查询状态：
+
+```powershell
+curl.exe "http://127.0.0.1:8083/api/v1/stream/<stream_id>/status"
+```
+
+下载 snapshot：
+
+```powershell
+curl.exe -o stream_snapshot.jpg "http://127.0.0.1:8083/api/v1/stream/<stream_id>/snapshot"
+```
+
+停止流任务：
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8083/api/v1/stream/<stream_id>/stop"
+```
+
+### Phase 14.0 实测结果
+
+本地摄像头 `camera_id=0` 测试通过：
+
+```text
+status = running
+frame_count = 1125 -> 1470
+width = 640
+height = 480
+fps = 30.0
+last_num_detections = 1
+snapshot 下载成功，约 39 KB
+stop 后 status = stopped
+stream_worker_1 pending = 0
+XPENDING = 0
+```
+
+这说明 Phase 14.0 的最小闭环成立：
+
+```text
+start 成功
+Worker 能消费任务
+摄像头能打开
+帧数持续增长
+YOLO 推理结果写入状态
+snapshot 能下载
+stop 能释放资源
+Redis 无 Pending 残留
+```
+
+---
+
+### Phase 14.5：流任务稳定性增强
+
+Phase 14.0 跑通后，测试中暴露出一个重要问题：单个 `stream_worker_1` 本质上只能稳定处理一个长时间流任务，但 Server 允许连续多次 `/stream/start`，导致多个任务都处于 `created`，后续容易产生排队混乱。
+
+Phase 14.5 重点解决这些稳定性问题：
+
+- 单活流保护：已有 active stream 时，重复 start 返回 HTTP 409。
+- 流任务 active key：`yolo:streamtask:yolo_stream_live_detect:active`。
+- 重连配置：`enable_reconnect`、`reconnect_max_attempts`、`reconnect_delay_ms`。
+- 打开失败或断流后进入 `reconnecting`。
+- 重连次数超过上限后进入 `failed`。
+- 状态中增加 `reconnect_count` 和 `no_frame_count`。
+- 无效摄像头或错误 RTSP URL 不再无声卡住，而是明确失败。
+- Worker 最终必须回到 `idle`，`current_task_id` 清空。
+- Redis 最终 `XPENDING=0`，active key 为 `nil`。
+
+Phase 14.5 配置字段：
+
+```yaml
+stream:
+  enabled: true
+  snapshot_dir: "D:/tensorrtx/yolo11/runtime/output/streams"
+  target_fps: 10
+  snapshot_interval_frames: 5
+  max_no_frame_count: 30
+  enable_reconnect: true
+  reconnect_max_attempts: 3
+  reconnect_delay_ms: 1000
+  max_runtime_seconds: 0
+```
+
+关键状态机：
+
+```text
+created -> starting -> running -> stopping -> stopped
+created -> starting -> reconnecting -> failed
+running -> reconnecting -> running
+running -> reconnecting -> failed
+running -> stopping -> stopped
+```
+
+注意：Phase 14.5 只做单路流稳定性，不做多路 RTSP 并发，也不做 WebSocket 推送。
+
+### 重复 start 保护
+
+当已有 active stream 时，再次提交 `/api/v1/stream/start` 会返回：
+
+```json
+{
+  "success": false,
+  "error_code": "STREAM_ALREADY_ACTIVE",
+  "error": "another stream task is already active; stop it before starting a new stream",
+  "active_stream_id": "stream_detect_20260708_143702_825_3"
+}
+```
+
+这一步很重要。实时流任务和普通图片 / 视频文件任务不同：它不是短任务，也不会自然快速结束。单 Worker 单路流阶段必须先禁止重复 start，避免任务堆积和摄像头资源冲突。
+
+### 无效摄像头重连失败处理
+
+测试 `camera_id=99`：
+
+```powershell
+@'
+{
+  "source_type": "camera",
+  "camera_id": 99
+}
+'@ | Set-Content -Encoding utf8 .\stream_start_bad_camera.json
+
+curl.exe -X POST "http://127.0.0.1:8083/api/v1/stream/start" `
+  -H "Content-Type: application/json" `
+  --data-binary "@stream_start_bad_camera.json"
+```
+
+实际状态变化：
+
+```text
+created
+-> starting
+-> reconnecting, reconnect_count=1
+-> reconnecting, reconnect_count=2
+-> reconnecting, reconnect_count=3
+-> failed
+```
+
+最终错误：
+
+```text
+last_error = failed to open stream source: type=camera, uri=99, reconnect_count=3
+```
+
+这个测试证明：错误 source 不会让 Worker 崩溃，也不会永久卡在 created/running，而是进入明确的 failed 状态。
+
+### Phase 14.5 自动测试脚本
+
+新增：
+
+```text
+tools/phase14_5_stream_stability_test.py
+```
+
+测试命令：
+
+```powershell
+python tools\phase14_5_stream_stability_test.py `
+  --url http://127.0.0.1:8083 `
+  --source-type camera `
+  --camera-id 0 `
+  --repeat 3 `
+  --run-seconds 5
+```
+
+脚本覆盖：
+
+```text
+1. health / ready 检查
+2. 连续 3 轮 start -> running -> snapshot -> stop -> stopped
+3. 每一轮重复 start，验证 409 STREAM_ALREADY_ACTIVE
+4. snapshot 是否返回 image/jpeg
+5. 无效 camera_id=99 是否 reconnecting 后 failed
+6. Worker 最终是否 idle
+```
+
+实测结果：
+
+```text
+PASS Phase 14.5 stability test
+```
+
+三轮结果：
+
+```text
+stream_detect_20260708_143702_825_3 frame_count=55 snapshot OK
+stream_detect_20260708_143711_961_5 frame_count=50 snapshot OK
+stream_detect_20260708_143720_141_7 frame_count=50 snapshot OK
+```
+
+Worker 最终状态：
+
+```text
+alive = true
+status = idle
+current_task_id = ""
+processed_count = 3
+failed_count = 1
+last_error = failed to open stream source: type=camera, uri=99, reconnect_count=3
+```
+
+Redis 验收：
+
+```bash
+redis-cli -h 172.19.196.109 -p 6379 XPENDING yolo:stream:live:detect yolo11_stream_detect_group
+redis-cli -h 172.19.196.109 -p 6379 XINFO CONSUMERS yolo:stream:live:detect yolo11_stream_detect_group
+redis-cli -h 172.19.196.109 -p 6379 GET yolo:streamtask:yolo_stream_live_detect:active
+```
+
+期望结果：
+
+```text
+XPENDING = 0
+stream_worker_1 pending = 0
+active key = nil
+```
+
+### Phase 14 / 14.5 遇到的问题与解决方案
+
+#### 1. PowerShell JSON 被吃掉，导致 `INVALID_JSON`
+
+现象：
+
+```json
+{
+  "error": "stream/start expects JSON body or an empty body",
+  "error_code": "INVALID_JSON"
+}
+```
+
+原因：PowerShell 中直接通过变量加 `curl.exe -d $body` 时，JSON 引号可能被处理掉。
+
+解决：使用 here-string 写入 `.json` 文件，再用 `--data-binary "@file.json"` 提交。
+
+反思：Windows 下测试 HTTP JSON 时，命令行本身也会成为 bug 来源。复杂 JSON 建议用文件提交。
+
+#### 2. 新任务一直停在 `created`
+
+现象：
+
+```text
+status = created
+consumer_name = ""
+start_time_ms = 0
+frame_count = 0
+```
+
+原因：Worker 还在处理旧的长时间流任务，没有领取新任务；或者 active key 与 Worker 心跳状态不一致。
+
+解决：
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8083/api/v1/stream/<old_stream_id>/stop"
+curl.exe "http://127.0.0.1:8083/api/v1/workers"
+```
+
+确保：
+
+```text
+status = idle
+current_task_id = ""
+```
+
+必要时重启 `yolo11_stream_worker.exe`。
+
+反思：实时流任务不是短任务，不能像图片任务一样连续提交多个任务等待排队。单 Worker 单路流阶段必须先做 active stream 保护。
+
+#### 3. 重复 start 导致多个 created 任务堆积
+
+现象：多次 `/stream/start` 都返回 success=true，多个 stream_id 处于 created。
+
+解决：Phase 14.5 增加 active key 和重复启动保护，已有 active stream 时返回 HTTP 409。
+
+反思：长任务服务必须考虑资源占用和生命周期互斥，不是所有任务都适合无限入队。
+
+#### 4. 无效 camera_id 不能直接算 start 失败
+
+Server 不一定能提前知道 `camera_id=99` 是否存在，因为真正打开 source 的是 Worker。因此 Server 返回 created 是合理的，随后 Worker 打开失败，再写入 reconnecting / failed。
+
+反思：入口层和执行层的职责要分清。Server 负责校验 JSON 和入队，Worker 负责打开真实 source 并决定 running 或 failed。
+
+#### 5. Worker failed_count 增加不是系统坏了
+
+无效 `camera_id=99` 测试后：
+
+```text
+failed_count = 1
+last_error = failed to open stream source: type=camera, uri=99, reconnect_count=3
+```
+
+这是预期失败，不是系统异常。判断系统是否健康应看：
+
+```text
+ready = true
+worker status = idle
+current_task_id = ""
+XPENDING = 0
+active key = nil
+```
+
+反思：稳定性测试中的失败任务要区分“预期失败”和“系统错误”。
+
+### Phase 14 / 14.5 阶段结论
+
+```text
+Phase 14.5 已完成并通过验收。
+```
+
+当前系统已经支持单路实时流任务服务化，具备 start、status、snapshot、stop 四个基本接口；支持 `camera_id=0` 本地摄像头流稳定运行；支持最新帧 snapshot 下载；支持重复启动保护；支持打开失败后的 reconnecting 与 failed 状态；支持 Worker 心跳、active key 和 Redis Pending 验收。三轮 Phase 14.5 稳定性测试全部通过，最终 `XPENDING=0`、`stream_worker_1 pending=0`、active key 为 `nil`、Worker 回到 `idle`。
+
+
+### Phase 14.5 最终补充：queued 语义、stale 清理与 stream metrics
+
+在最开始的 Phase 14.0 复盘中，流任务初始状态曾经使用 `created`。后续为了和图片、OBB、视频异步任务的入队语义统一，最终版本将 `/api/v1/stream/start` 返回改为：
+
+```text
+status = queued
+lifecycle_status = queued
+```
+
+因此当前最终状态机应理解为：
+
+```text
+queued -> starting -> running -> stopping -> stopped
+queued -> starting -> reconnecting -> failed
+running -> reconnecting -> running
+running -> reconnecting -> failed
+```
+
+这次最终修正还补齐了三个容易被忽略、但对长任务服务非常重要的点。
+
+#### 1. active lock TTL 续期
+
+流任务是长生命周期任务，如果 active key 只在 start 时设置 TTL，而运行过程中不续期，长时间运行后可能出现 active key 过期、Server 误以为没有活跃流、从而允许重复 start 的风险。因此最终版本在以下状态更新点续期：
+
+```text
+markStreamStarting
+markStreamRunning
+markStreamReconnecting
+updateStreamLatest
+requestStopStreamTask
+Worker heartbeat / running loop
+```
+
+对应的核心 Redis key 包括：
+
+```text
+yolo:streamtask:{stream_id}:status
+yolo:streamtask:{stream_id}:meta
+yolo:streamtask:{stream_id}:latest
+yolo:streamtask:yolo_stream_live_detect:active
+```
+
+这说明实时流服务不能只看“开始时写入状态”，还要保证运行过程中的状态、锁和最新帧信息持续保活。
+
+#### 2. stale stream cleanup
+
+调试过程中曾出现旧 stream 已经不再被 Worker 持有，但 active key 仍然残留，导致新任务被 `STREAM_ALREADY_ACTIVE` 拦截。最终通过 stale cleanup 修复：Server 在处理新的 `/stream/start` 前，会检查旧 active stream 是否仍然可信。
+
+判断依据包括：
+
+```text
+旧 stream status 是否是 running / starting / reconnecting / stopping
+Worker heartbeat 是否存在
+Worker current_task_id 是否仍然等于旧 stream_id
+latest last_update_ms 是否长时间没有刷新
+```
+
+如果发现旧任务已经 stale，就将其标记为 failed/stale，并释放 active key。这个机制解决的是“Worker 异常退出或状态残留导致系统不能继续 start”的问题。
+
+#### 3. stream terminal metrics
+
+普通图片 / OBB / 视频短任务通常在 `markDone()` / `markFailed()` 后再 `XACK`，metrics 可以在短任务完成路径中更新。但 stream 不一样：stream start command 在进入 `running` 后就已经 `XACK`，任务真正结束发生在后续的 `stop` 或 `failed` 终态。
+
+因此最终必须在：
+
+```cpp
+RedisTaskQueue::markStreamStopped(...)
+RedisTaskQueue::markStreamFailed(...)
+```
+
+里面显式写入 metrics：
+
+```text
+stopped -> HINCRBY yolo:metrics:yolo_stream_live_detect:global done_count 1
+failed  -> HINCRBY yolo:metrics:yolo_stream_live_detect:global failed_count 1
+```
+
+同时更新：
+
+```text
+yolo:metrics:yolo_stream_live_detect:worker:done
+yolo:metrics:yolo_stream_live_detect:worker:failed
+yolo:metrics:yolo_stream_live_detect:recent:done
+last_task_id
+last_finish_time_ms
+```
+
+最终验证结果：
+
+```text
+PASS Phase 14.5 stream metrics check
+valid camera stream   -> stopped -> total_tasks_done = 1
+invalid camera_id=99  -> failed  -> total_tasks_failed = 1
+metrics_found = true
+worker_distribution.stream_worker_1 = 1
+worker_failed_distribution.stream_worker_1 = 1
+```
+
+这一步的反思是：长任务的“消息确认”和“任务完成”不是同一个时刻。实时流任务进入 running 后可以确认 start command，但业务上的 done/failed 只能在终态函数里统计。
+
+#### 4. source matrix 验收口径
+
+最终输入源验收应按三类区分：
+
+| source_type | 当前验收结论 | 说明 |
+|---|---|---|
+| file | PASS | 本地视频文件可作为伪实时流读取，EOF 后正常 stopped |
+| camera | PASS | 本机 `camera_id=0` 可 start / snapshot / stop |
+| rtsp | 环境受限 | 当前没有真实网络摄像头，因此无法验证 RTSP 成功路径；占位 URL 的失败路径已验证为 reconnecting -> failed |
+
+这不是 RTSP 功能失败，而是测试环境缺少真实 RTSP source。后续拿到真实网络摄像头或有效 RTSP URL 后，只需要补一次 source matrix 的 RTSP 成功路径测试。
+
+#### 5. 本阶段最终封板结论
+
+```text
+Phase 14.0 Stream Lifecycle：PASS
+Phase 14.5 Stream Stability / Reconnect / Metrics：PASS
+```
+
+最终验收项：
+
+```text
+file source：PASS
+camera source：PASS
+RTSP：无真实网络摄像头，异常路径 PASS
+duplicate start 409：PASS
+invalid camera reconnect -> failed：PASS
+stream status lifecycle：PASS
+snapshot：PASS
+heartbeat：PASS
+Redis pending：PASS
+active lock release：PASS
+stream metrics done/failed：PASS
+```
+
+### Phase 14.5 之后的实际推进
+
+Phase 14.5 后已经进入并完成 Phase 15。Phase 15 没有直接做多 GPU 自动调度，而是先完成 Worker 能力描述、资源声明和统一观测，为后续调度打地基。
+
+---
+
+## Phase 15：Worker / 模型 / 任务类型能力注册与统一观测
+
+### 阶段总定位
+
+Phase 15 的核心不是继续新增模型或接口，而是解决“服务类型越来越多以后，Server 如何知道每个 Worker 能处理什么”的问题。Phase 14.5 结束时，项目已经有四类服务：Detect 图片、OBB 图片、Video 文件、Stream 实时流。它们的 Worker 名称、队列、任务类型、执行方式都不同，如果继续只用简单的 `model_type` 或 `consumer_name` 判断，很容易在后续多 GPU、多 Worker、多路流扩展时失控。
+
+所以 Phase 15 的目标是：让每个 Worker 在 heartbeat 中清楚声明自己的能力，并让 `/ready`、`/workers`、`/metrics` 能按这些能力字段过滤和展示。
+
+可以概括为：
+
+```text
+Phase 15：Worker Capability Registry
+├── 不做自动多 GPU 调度
+├── 不做多路 RTSP 并发
+├── 不做新模型类型
+├── 先统一 Worker 能力声明
+├── 再统一 ready / workers / metrics 过滤
+└── 为 Phase 16 / Phase 17 的生产化和部署增强做准备
+```
+
+### 为什么需要 Worker Capability Registry
+
+前面阶段的 Worker 在线判断主要依赖 heartbeat：
+
+```text
+yolo:worker:{consumer_name}:heartbeat
+```
+
+这能判断 Worker 是否活着，但不能充分描述 Worker 的能力。例如：
+
+```text
+worker_1          -> Detect 图片短任务
+obb_worker_1      -> OBB 图片短任务
+video_worker_1    -> Video 文件长任务，但底层用 Detect Runner
+stream_worker_1   -> Stream 实时流长任务，也用 Detect Runner
+```
+
+如果只看 `model_type=detect`，Video 和 Stream 会被误认为普通 Detect 图片 Worker；如果只看 `consumer_name`，后续扩容或多 GPU 部署时又会变得很脆弱。因此 Phase 15 将 Worker heartbeat 从“存活信息”升级为“能力注册信息”。
+
+### Phase 15 核心字段
+
+| 字段 | 含义 |
+|---|---|
+| `model_type` | 对外服务类型，用于 `/workers`、`/ready`、`/metrics` 过滤，例如 `detect`、`obb`、`video`、`stream` |
+| `runner_model_type` | 内部实际推理模型，例如 Video / Stream 当前都使用 Detect Runner，所以是 `detect` |
+| `worker_group` | Worker 资源分组，例如 `image_detect_gpu0`、`video_detect_gpu0` |
+| `worker_kind` | Worker 类别，例如 `image`、`video`、`stream` |
+| `task_kind` | 任务类型，例如 `image_async`、`video_file`、`live_stream` |
+| `stream_type` | 任务生命周期类型，短任务为 `redis_stream`，实时流为 `long_running_stream` |
+| `gpu_id` | Worker 绑定的 GPU 编号 |
+| `max_concurrency` | 当前 Worker 声明的并发能力，现阶段主要是元信息，不做自动调度 |
+| `engine_path` | 当前 Worker 使用的 TensorRT engine |
+| `labels_path` | 当前 Worker 使用的 labels 文件 |
+
+这一阶段最重要的认知是：`model_type` 和 `runner_model_type` 不是一回事。Video / Stream 是服务类型，但底层推理还是 Detect 模型，所以应该写成：
+
+```text
+model_type = video / stream
+runner_model_type = detect
+```
+
+### 四类 Worker 能力矩阵
+
+| 服务 | 端口 | Worker | model_type | runner_model_type | worker_group | worker_kind | task_kind | stream_type |
+|---|---:|---|---|---|---|---|---|---|
+| Detect 图片 | 8080 | `worker_1` | `detect` | `detect` | `image_detect_gpu0` | `image` | `image_async` | `redis_stream` |
+| OBB 图片 | 8081 | `obb_worker_1` | `obb` | `obb` | `image_obb_gpu0` | `image` | `image_async` | `redis_stream` |
+| Video 文件 | 8082 | `video_worker_1` | `video` | `detect` | `video_detect_gpu0` | `video` | `video_file` | `redis_stream` |
+| Stream 实时流 | 8083 | `stream_worker_1` | `stream` | `detect` | `stream_detect_gpu0` | `stream` | `live_stream` | `long_running_stream` |
+
+### 主要代码改动
+
+| 文件 | 修改内容 |
+|---|---|
+| `include/server/app_config.h` | Worker 配置新增 `worker_group`、`worker_kind`、`task_kind`、`stream_type`、`max_concurrency` 等字段 |
+| `src/server/app_config.cpp` | 从 YAML 读取 Phase 15 新字段，并提供默认值 |
+| `include/server/redis_task_queue.h` | Worker heartbeat 结构扩展 capability 字段 |
+| `src/server/redis_task_queue.cpp` | `updateWorkerHeartbeat()` 写入 `model_type`、`runner_model_type`、`worker_group` 等字段；metrics 增加 profile 能力维度 |
+| `src/server/inference_worker.cpp` | Detect / OBB 图片 Worker 写入 image capability |
+| `src/server/video_inference_worker.cpp` | Video Worker 写入 `model_type=video`、`runner_model_type=detect` |
+| `src/server/stream_inference_worker.cpp` | Stream Worker 写入 `model_type=stream`、`task_kind=live_stream`、`stream_type=long_running_stream` |
+| `src/server/http_controller.cpp` | `/ready`、`/workers`、`/metrics` 支持 capability filters；Stream start/status 对外 `task_kind` 统一为 `live_stream` |
+| `config/*detect/obb/video/stream*.yaml` | 为四类服务补充 worker capability 配置 |
+| `tools/phase15_worker_registry_test.py` | 新增 Phase 15 Worker Registry 自动检查脚本 |
+
+### 关键接口过滤方式
+
+Detect：
+
+```powershell
+curl.exe "http://127.0.0.1:8080/api/v1/workers?model=detect&task_kind=image_async"
+curl.exe "http://127.0.0.1:8080/api/v1/ready?worker_group=image_detect_gpu0"
+curl.exe "http://127.0.0.1:8080/api/v1/metrics?model=detect"
+```
+
+OBB：
+
+```powershell
+curl.exe "http://127.0.0.1:8081/api/v1/workers?model=obb&task_kind=image_async"
+curl.exe "http://127.0.0.1:8081/api/v1/ready?worker_group=image_obb_gpu0"
+curl.exe "http://127.0.0.1:8081/api/v1/metrics?model=obb"
+```
+
+Video：
+
+```powershell
+curl.exe "http://127.0.0.1:8082/api/v1/workers?model=video&task_kind=video_file"
+curl.exe "http://127.0.0.1:8082/api/v1/ready?worker_group=video_detect_gpu0"
+curl.exe "http://127.0.0.1:8082/api/v1/metrics?model=video"
+```
+
+Stream：
+
+```powershell
+curl.exe "http://127.0.0.1:8083/api/v1/workers?model=stream&task_kind=live_stream"
+curl.exe "http://127.0.0.1:8083/api/v1/ready?worker_group=stream_detect_gpu0"
+curl.exe "http://127.0.0.1:8083/api/v1/metrics?model=stream"
+```
+
+预期结果：
+
+```text
+matched_workers = 1
+alive_workers = 1
+ready = true
+redis_pending = 0
+phase = phase15_worker_capability_registry
+```
+
+### Phase 15 实测结果
+
+#### Detect 8080
+
+验证结果：
+
+```text
+/health phase = phase15_worker_capability_registry
+/workers?model=detect&task_kind=image_async matched_workers=1
+/ready?worker_group=image_detect_gpu0 ready=true
+异步 detect 图片任务 status=done
+num_detections=3
+processed_count=1
+failed_count=0
+XPENDING yolo:stream:detect yolo11_group = 0
+```
+
+关键 heartbeat：
+
+```text
+model_type = detect
+runner_model_type = detect
+worker_group = image_detect_gpu0
+worker_kind = image
+task_kind = image_async
+stream_type = redis_stream
+```
+
+#### OBB 8081
+
+验证结果：
+
+```text
+/workers?model=obb&task_kind=image_async matched_workers=1
+/ready?worker_group=image_obb_gpu0 ready=true
+OBB 图片任务 status=done
+result image 可下载
+processed_count=1
+failed_count=0
+XPENDING yolo:stream:obb yolo11_obb_group = 0
+```
+
+关键 heartbeat：
+
+```text
+model_type = obb
+runner_model_type = obb
+worker_group = image_obb_gpu0
+worker_kind = image
+task_kind = image_async
+stream_type = redis_stream
+```
+
+#### Video 8082
+
+验证结果：
+
+```text
+/workers?model=video&task_kind=video_file matched_workers=1
+/ready?worker_group=video_detect_gpu0 ready=true
+视频任务 status=done
+processed_frames=87
+progress=1.0
+result video 可下载
+processed_count=1
+failed_count=0
+XPENDING yolo:stream:video:detect yolo11_video_detect_group = 0
+```
+
+关键 heartbeat：
+
+```text
+model_type = video
+runner_model_type = detect
+worker_group = video_detect_gpu0
+worker_kind = video
+task_kind = video_file
+stream_type = redis_stream
+```
+
+#### Stream 8083
+
+验证结果：
+
+```text
+/workers?model=stream&task_kind=live_stream matched_workers=1
+/ready?worker_group=stream_detect_gpu0 ready=true
+camera_id=0 stream/start 返回 queued
+snapshot 可下载
+stop 后 status=stopped
+frame_count=300 左右
+last_num_detections=1
+metrics total_done=1
+total_failed=0
+processed_count=1
+XPENDING yolo:stream:live:detect yolo11_stream_detect_group = 0
+```
+
+关键 heartbeat：
+
+```text
+model_type = stream
+runner_model_type = detect
+worker_group = stream_detect_gpu0
+worker_kind = stream
+task_kind = live_stream
+stream_type = long_running_stream
+```
+
+### Phase 15 遇到的问题与解决方案
+
+#### 1. 先 curl `/workers` 但 Server 没启动
+
+现象：
+
+```text
+curl: (7) Failed to connect to 127.0.0.1 port 8080
+```
+
+原因：`/workers`、`/ready` 都是 HTTP 接口，必须先启动对应 Server；`/ready` 要 true，还必须启动对应 Worker。
+
+解决：先启动：
+
+```powershell
+# Detect Server
+.\outuildd-Debug\yolo11_server.exe .\config\server_detect.yaml
+
+# Detect Worker
+.\outuildd-Debug\yolo11_worker.exe .\config\worker_detect.yaml --consumer-name worker_1
+```
+
+反思：Server 负责 HTTP 接入，Worker 负责写 heartbeat 和执行推理；两者缺一不可。
+
+#### 2. Video Worker 一开始 `model=video` 过滤不到
+
+现象：
+
+```text
+/workers?model=video&task_kind=video_file
+matched_workers = 0
+
+/ready?worker_group=video_detect_gpu0
+ready = true
+matched_workers = 1
+```
+
+原因：Video Worker heartbeat 里最初写成了：
+
+```text
+model_type = detect
+runner_model_type = detect
+```
+
+这样按 `worker_group` 能找到，但按 `model=video` 找不到。
+
+解决：修改 `src/server/video_inference_worker.cpp`，让 Video Worker 对外声明：
+
+```text
+model_type = video
+runner_model_type = detect
+```
+
+反思：Video 是服务类型，Detect 是内部推理模型。调度语义和模型执行语义必须分开。
+
+#### 3. Stream API 里 `task_kind=stream` 和 Registry 的 `live_stream` 不一致
+
+现象：Worker registry / metrics 中是：
+
+```text
+task_kind = live_stream
+```
+
+但 `/stream/start` 和 `/stream/status` 返回的是：
+
+```text
+task_kind = stream
+```
+
+解决：修改 `src/server/http_controller.cpp`，将 Stream 对外 API 返回统一为：
+
+```text
+task_kind = live_stream
+```
+
+保留 Redis 内部 start command 的历史语义，不强行破坏 Worker 消费逻辑。
+
+反思：内部任务命令和外部调度语义可以不同，但对外 API、Registry 和 Metrics 要保持一致。
+
+### Phase 15 阶段结论
+
+```text
+Phase 15 已完成并通过验收。
+```
+
+当前项目已经具备四类服务的统一能力注册与观测能力。Detect、OBB、Video、Stream 都可以通过 `/workers`、`/ready`、`/metrics` 按模型、任务类型和 Worker 分组进行过滤。四类服务均通过真实任务验证，最终 Redis `XPENDING=0`。这说明项目已经从“多个服务都能跑”推进到“多个服务可以被统一识别、统一观测、统一验收”的阶段。
+
+Phase 15 的意义不是自动调度本身，而是为自动调度做准备。只有 Worker 能清楚声明“我是谁、我能处理什么、我绑定什么资源、当前是否空闲”，后续多 GPU、多路 RTSP、服务守护和生产部署才有稳定基础。
+
+下一阶段建议进入：
+
+```text
+Phase 16：生产化增强前置
+```
+
+Phase 16 可以重点处理：
+
+```text
+Storage 抽象
+服务启动 / 停止脚本整理
+日志规范与运行报告
+metrics 对齐
+Redis / runtime 清理策略
+配置模板与部署文档
+```
+
+继续后置：
+
+```text
+多 GPU 自动调度
+多路 RTSP 并发
+Docker / Linux 迁移
+Prometheus / Grafana
+数据库持久化
+前端页面
+```
+
+---
+
+
 ## 关键问题记录与反思
 
 ### 1. 第三方库安装成功后，下一步不是继续装库，而是接入 CMake
@@ -3213,6 +4777,8 @@ cd D:\tensorrtx\yolo11
 
 cmake --build out\build\x64-Debug --config Debug --target yolo11_server
 cmake --build out\build\x64-Debug --config Debug --target yolo11_worker
+cmake --build out\build\x64-Debug --config Debug --target yolo11_video_worker
+cmake --build out\build\x64-Debug --config Debug --target yolo11_stream_worker
 
 .\out\build\x64-Debug\yolo11_server.exe .\config\server.yaml
 
@@ -3230,6 +4796,61 @@ curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image/async" `
 curl.exe "http://127.0.0.1:8080/api/v1/result/<task_id>"
 
 curl.exe "http://127.0.0.1:8080/api/v1/result/<task_id>/image" -o result.jpg
+```
+
+### Video Detect 异步服务
+
+```powershell
+cd D:\tensorrtx\yolo11
+
+cmake --build out\build\x64-Debug --config Debug --target yolo11_server
+cmake --build out\build\x64-Debug --config Debug --target yolo11_video_worker
+
+# 窗口 1：Video Server
+.\out\build\x64-Debug\yolo11_server.exe .\config\server_video.yaml
+
+# 窗口 2：Video Worker
+.\out\build\x64-Debug\yolo11_video_worker.exe .\config\worker_video.yaml --consumer-name video_worker_1
+
+# 窗口 3：检查和测试
+curl.exe "http://127.0.0.1:8082/api/v1/health"
+curl.exe "http://127.0.0.1:8082/api/v1/ready"
+curl.exe "http://127.0.0.1:8082/api/v1/workers"
+curl.exe "http://127.0.0.1:8082/api/v1/metrics"
+
+python tools\phase13_video_smoke_test.py `
+  --url http://127.0.0.1:8082 `
+  --video D:/tensorrtx/yolo11/videos/test.mp4 `
+  --download D:/tensorrtx/yolo11/runtime/output/videos/detect/result_smoke.mp4
+```
+
+
+### Stream 实时流服务
+
+```powershell
+cd D:\tensorrtx\yolo11
+
+cmake --build out\build\x64-Debug --config Debug --target yolo11_server
+cmake --build out\build\x64-Debug --config Debug --target yolo11_stream_worker
+
+# 窗口 1：Stream Server
+.\out\build\x64-Debug\yolo11_server.exe .\config\server_stream.yaml
+
+# 窗口 2：Stream Worker
+.\out\build\x64-Debug\yolo11_stream_worker.exe .\config\worker_stream.yaml --consumer-name stream_worker_1
+
+# 窗口 3：检查
+curl.exe "http://127.0.0.1:8083/api/v1/health"
+curl.exe "http://127.0.0.1:8083/api/v1/ready"
+curl.exe "http://127.0.0.1:8083/api/v1/workers"
+
+# 推荐用脚本测试
+python tools\phase14_5_stream_stability_test.py `
+  --url http://127.0.0.1:8083 `
+  --source-type camera `
+  --camera-id 0 `
+  --repeat 3 `
+  --run-seconds 5
 ```
 
 ### OBB
@@ -3402,6 +5023,121 @@ target_link_libraries(yolo11_server PRIVATE hiredis::hiredis ws2_32)
 
 如果出现 `timeval` 未定义，检查 `redis_task_queue.cpp` 中 WinSock 头文件是否在 `hiredis.h` 之前。
 
+### 视频任务 `processed_frames < total_frames`
+
+如果看到：
+
+```text
+total_frames = 111
+processed_frames = 87
+status = done
+progress = 1.0
+```
+
+这通常不是任务失败，而是 OpenCV 对 MP4 的 `CAP_PROP_FRAME_COUNT` 返回了容器估计帧数，实际 `VideoCapture.read()` 能解码出的有效帧数可能更少。只要 `status=done`、结果视频能下载、`XPENDING=0`，就说明任务正常在 EOF 结束。
+
+### video 输出目录不统一
+
+Phase 13.5 之后推荐统一使用：
+
+```text
+runtime/input/videos/detect
+runtime/output/videos/detect
+runtime/logs/video
+```
+
+如果仍然看到 `temp/video/output`，说明使用了旧配置：
+
+```text
+config/server_video_phase13.yaml
+config/server_video_phase13_5.yaml
+```
+
+应该改用当前配置：
+
+```text
+config/server_video.yaml
+config/worker_video.yaml
+```
+
+
+
+### `/api/v1/stream/start` 返回 `INVALID_JSON`
+
+PowerShell 中直接传 JSON 字符串可能会丢失双引号。建议使用：
+
+```powershell
+@'
+{
+  "source_type": "camera",
+  "camera_id": 0
+}
+'@ | Set-Content -Encoding utf8 .\stream_start_camera.json
+
+curl.exe -X POST "http://127.0.0.1:8083/api/v1/stream/start" `
+  -H "Content-Type: application/json" `
+  --data-binary "@stream_start_camera.json"
+```
+
+### Stream 任务一直是 `created`
+
+说明任务已经创建，但 Worker 还没开始处理。排查：
+
+```powershell
+curl.exe "http://127.0.0.1:8083/api/v1/workers"
+```
+
+```bash
+redis-cli -h 172.19.196.109 -p 6379 XPENDING yolo:stream:live:detect yolo11_stream_detect_group
+redis-cli -h 172.19.196.109 -p 6379 GET yolo:streamtask:yolo_stream_live_detect:active
+```
+
+如果 Worker 正在跑旧 stream，先 stop 旧任务；如果 Worker 卡住，重启 `yolo11_stream_worker.exe`。
+
+### 重复启动 Stream 返回 HTTP 409
+
+这是 Phase 14.5 的预期保护：
+
+```text
+STREAM_ALREADY_ACTIVE
+```
+
+当前阶段是单 Worker 单活流设计，必须先 stop 当前 stream，再 start 新 stream。
+
+### `camera_id=99` 进入 `reconnecting` 后 `failed`
+
+这是预期结果。Worker 会尝试重新打开 source，达到 `reconnect_max_attempts` 后写入 failed，并记录 `last_error`。
+
+
+### `/metrics?model=stream` 一直是 0
+
+这个问题最终定位为：stream 生命周期已经能 `running -> stopped`，但是 `markStreamStopped()` / `markStreamFailed()` 里面没有写入 stream 专用 metrics，或者源码改了但 `yolo11_stream_worker.exe` 没有重新编译/重启。
+
+正确检查方式：
+
+```powershell
+Select-String -Path .\src\server\redis_task_queue.cpp `
+  -Pattern "markStreamStopped|markStreamFailed|HINCRBY %s done_count 1|HINCRBY %s failed_count 1" `
+  -Context 2,2
+```
+
+Redis 侧检查：
+
+```bash
+redis-cli -h 172.19.196.109 -p 6379 HGETALL yolo:metrics:yolo_stream_live_detect:global
+redis-cli -h 172.19.196.109 -p 6379 HGETALL yolo:metrics:yolo_stream_live_detect:worker:done
+redis-cli -h 172.19.196.109 -p 6379 HGETALL yolo:metrics:yolo_stream_live_detect:worker:failed
+```
+
+修复后不要 `--clean-first`，优先增量编译，避免无关 CUDA 文件重新触发 `cudafe++` 崩溃：
+
+```powershell
+cmake --build out\build\x64-Debug --config Debug --target yolo11_stream_worker --parallel 1
+cmake --build out\build\x64-Debug --config Debug --target yolo11_server --parallel 1
+```
+
+反思：实时流任务的 done/failed 不发生在 XACK 时，而发生在 `stopped/failed` 终态，所以 metrics 必须写在 stream 的终态函数里。
+
 ## Git Ignore
 
 以下生成文件不建议上传到 GitHub：
@@ -3410,6 +5146,8 @@ target_link_libraries(yolo11_server PRIVATE hiredis::hiredis ws2_32)
 out/
 build/
 .vs/
+runtime/
+reports/
 output/
 temp/
 logs/
@@ -3444,40 +5182,38 @@ Phase 10.0：OBB 图片异步服务最小闭环
 Phase 10.5：多模型配置与 Runner 抽象整理
 Phase 11.0：OBB 稳定性、异常输入与 Worker 恢复验证
 Phase 12.0：Detect + OBB 双服务并行部署
+Phase 13.0：Detect 视频文件异步检测最小闭环
+Phase 13.5：视频稳定性、取消、异常输入、Worker 恢复与批量压测
+Structure Cleanup：config 清理与 runtime 目录统一
+Phase 14.0：RTSP / 摄像头流任务最小闭环
+Phase 14.5：流任务稳定性增强、重复启动保护与重连失败处理
+Phase 15：Worker Capability Registry、能力过滤、四类服务统一观测与真实任务验收
 ```
 
 下一步建议进入：
 
 ```text
-Phase 13：视频文件异步检测服务
+Phase 16：生产化增强前置
 ```
 
-Phase 13 推荐目标：
+Phase 16 推荐目标：
 
 ```text
-视频文件异步检测
-├── 上传视频文件并生成 video_task_id
-├── Worker 逐帧读取视频并执行 detect / OBB 推理
-├── 记录 progress、total_frames、processed_frames、fps
-├── 支持查询任务进度、失败原因和结果视频路径
-└── 输出带检测结果的视频文件，后续再扩展 cancel / RTSP / 多 GPU
-
-继续保留的稳定性机制
-├── Redis Stream Consumer Group
-├── 每个 Worker 独立 Detector
-├── 每个 Worker 独立 Redis 长连接
-├── Worker heartbeat
-├── Pending reclaim
-├── XTRIM Stream 长度控制
-├── Redis 图片 TTL 和内存保护
-├── spdlog 日志
-└── /api/v1/metrics 指标接口
+生产化增强前置
+├── Storage 抽象：图片、视频、流截图统一存储接口
+├── 服务启动 / 停止脚本标准化
+├── Redis key 与 runtime 文件清理策略
+├── 日志目录、日志级别、运行报告规范化
+├── metrics 字段继续对齐，预留 Prometheus 接入
+├── 配置模板整理，减少阶段历史配置干扰
+└── 暂不急着做多 GPU 自动调度，先把单机四服务部署形态封干净
 ```
 
 后续扩展方向：
 
-- 视频文件异步检测
-- RTSP / 摄像头流服务化
+- 多路 RTSP / 摄像头流并发管理
+- WebSocket / SSE 实时推送
+- 更完整的存储抽象与历史任务管理
 - 多 GPU / 多模型 Worker 调度
 - 批量推理 / micro-batching
 - 对象存储或数据库持久化
