@@ -24,6 +24,9 @@ namespace yolo11_server {
         std::string labels_path = "./labels/coco.txt";
         int gpu_id = 0;
         bool use_gpu_postprocess = false;
+
+        // Phase 17: classification top-k output size. Used only when type=cls.
+        int cls_topk = 5;
     };
 
     struct OutputSection {
@@ -154,6 +157,16 @@ namespace yolo11_server {
         std::string consumer_name_prefix = "worker_";
         bool log_task_done = true;
 
+        // Phase 15: worker capability/resource declaration.
+        // These fields are written into the heartbeat so /ready, /workers and
+        // /metrics can reason about model/task isolation before introducing
+        // real multi-GPU automatic scheduling.
+        std::string worker_group;       // e.g. image_detect_gpu0 / video_detect_gpu0 / stream_detect_gpu0
+        std::string worker_kind;        // image / video / stream
+        std::string task_kind;          // image_async / video_file / live_stream
+        std::string stream_type;        // redis_stream / long_running_stream
+        int max_concurrency = 1;        // descriptive capacity, not an automatic scheduler yet
+
         // Phase 8: heartbeat written by yolo11_worker.exe / InferenceWorker.
         bool heartbeat_enabled = true;
         int heartbeat_interval_ms = 3000;
@@ -170,6 +183,7 @@ namespace yolo11_server {
         std::string labels_path;
         int gpu_id = 0;
         bool use_gpu_postprocess = false;
+        int cls_topk = 5;
         std::string stream_key;
         std::string consumer_group;
         std::string consumer_name_prefix;

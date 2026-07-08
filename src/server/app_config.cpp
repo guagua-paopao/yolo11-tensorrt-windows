@@ -2,6 +2,8 @@
 
 #include <iostream>
 #include <stdexcept>
+#include <algorithm>
+#include <cctype>
 
 #include <yaml-cpp/yaml.h>
 
@@ -15,6 +17,71 @@ namespace yolo11_server {
                 return default_value;
             }
             return node[key].as<T>();
+        }
+
+        std::string toLowerString(std::string value) {
+            std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+            });
+            return value;
+        }
+
+        std::string inferWorkerKind(const AppConfig& config) {
+            if (config.stream.enabled) {
+                return "stream";
+            }
+            if (config.video.enabled) {
+                return "video";
+            }
+            return "image";
+        }
+
+        std::string inferTaskKind(const AppConfig& config) {
+            if (config.stream.enabled) {
+                return "live_stream";
+            }
+            if (config.video.enabled) {
+                return "video_file";
+            }
+            return "image_async";
+        }
+
+        std::string inferStreamType(const AppConfig& config) {
+            return config.stream.enabled ? std::string("long_running_stream") : std::string("redis_stream");
+        }
+
+        std::string inferProfileType(const AppConfig& config) {
+            if (config.stream.enabled) {
+                return "stream";
+            }
+            if (config.video.enabled) {
+                return "video";
+            }
+            return toLowerString(config.model.type.empty() ? std::string("detect") : config.model.type);
+        }
+
+        std::string inferWorkerGroup(const AppConfig& config) {
+            const std::string kind = inferWorkerKind(config);
+            const std::string profile = inferProfileType(config);
+            return kind + "_" + profile + "_gpu" + std::to_string(config.model.gpu_id);
+        }
+
+        void normalizeWorkerCapability(AppConfig& config) {
+            if (config.worker.worker_kind.empty()) {
+                config.worker.worker_kind = inferWorkerKind(config);
+            }
+            if (config.worker.task_kind.empty()) {
+                config.worker.task_kind = inferTaskKind(config);
+            }
+            if (config.worker.stream_type.empty()) {
+                config.worker.stream_type = inferStreamType(config);
+            }
+            if (config.worker.worker_group.empty()) {
+                config.worker.worker_group = inferWorkerGroup(config);
+            }
+            if (config.worker.max_concurrency <= 0) {
+                config.worker.max_concurrency = config.stream.enabled ? 1 : config.worker.worker_num;
+            }
         }
 
     }  // namespace
@@ -55,6 +122,10 @@ namespace yolo11_server {
         config.model.labels_path = readOrDefault<std::string>(model, "labels_path", config.model.labels_path);
         config.model.gpu_id = readOrDefault<int>(model, "gpu_id", config.model.gpu_id);
         config.model.use_gpu_postprocess = readOrDefault<bool>(model, "use_gpu_postprocess", config.model.use_gpu_postprocess);
+        config.model.cls_topk = readOrDefault<int>(model, "cls_topk", config.model.cls_topk);
+        if (config.model.cls_topk <= 0) {
+            config.model.cls_topk = 5;
+        }
 
         auto output = root["output"];
         config.output.save_result_image = readOrDefault<bool>(output, "save_result_image", config.output.save_result_image);
@@ -284,6 +355,31 @@ namespace yolo11_server {
             "log_task_done",
             config.worker.log_task_done
         );
+        config.worker.worker_group = readOrDefault<std::string>(
+            worker,
+            "worker_group",
+            config.worker.worker_group
+        );
+        config.worker.worker_kind = readOrDefault<std::string>(
+            worker,
+            "worker_kind",
+            config.worker.worker_kind
+        );
+        config.worker.task_kind = readOrDefault<std::string>(
+            worker,
+            "task_kind",
+            config.worker.task_kind
+        );
+        config.worker.stream_type = readOrDefault<std::string>(
+            worker,
+            "stream_type",
+            config.worker.stream_type
+        );
+        config.worker.max_concurrency = readOrDefault<int>(
+            worker,
+            "max_concurrency",
+            config.worker.max_concurrency
+        );
         config.worker.heartbeat_enabled = readOrDefault<bool>(
             worker,
             "heartbeat_enabled",
@@ -322,6 +418,9 @@ namespace yolo11_server {
         if (config.worker.heartbeat_ttl_seconds < 3) {
             config.worker.heartbeat_ttl_seconds = 3;
         }
+        if (config.worker.max_concurrency <= 0) {
+            config.worker.max_concurrency = 1;
+        }
 
 
         // Phase 10.5: optional multi-model profile registry.
@@ -347,6 +446,7 @@ namespace yolo11_server {
                 profile.labels_path = readOrDefault<std::string>(node, "labels_path", config.model.labels_path);
                 profile.gpu_id = readOrDefault<int>(node, "gpu_id", config.model.gpu_id);
                 profile.use_gpu_postprocess = readOrDefault<bool>(node, "use_gpu_postprocess", config.model.use_gpu_postprocess);
+                profile.cls_topk = readOrDefault<int>(node, "cls_topk", config.model.cls_topk);
                 profile.stream_key = readOrDefault<std::string>(node, "stream_key", config.redis.stream_key);
                 profile.consumer_group = readOrDefault<std::string>(node, "consumer_group", config.redis.consumer_group);
                 profile.consumer_name_prefix = readOrDefault<std::string>(node, "consumer_name_prefix", config.worker.consumer_name_prefix);
@@ -370,6 +470,7 @@ namespace yolo11_server {
                 config.model.labels_path = profile.labels_path;
                 config.model.gpu_id = profile.gpu_id;
                 config.model.use_gpu_postprocess = profile.use_gpu_postprocess;
+                config.model.cls_topk = profile.cls_topk;
                 config.redis.stream_key = profile.stream_key;
                 config.redis.consumer_group = profile.consumer_group;
                 config.worker.consumer_name_prefix = profile.consumer_name_prefix;
@@ -402,11 +503,41 @@ namespace yolo11_server {
             config.worker.consumer_name_prefix = "worker_";
         }
         if (config.redis.stream_key.empty()) {
-            config.redis.stream_key = config.model.type == "obb" ? "yolo:stream:obb" : "yolo:stream:detect";
+            if (config.model.type == "obb") {
+                config.redis.stream_key = "yolo:stream:obb";
+            }
+            else if (config.model.type == "cls") {
+                config.redis.stream_key = "yolo:stream:cls";
+            }
+            else if (config.model.type == "pose") {
+                config.redis.stream_key = "yolo:stream:pose";
+            }
+            else if (config.model.type == "seg") {
+                config.redis.stream_key = "yolo:stream:seg";
+            }
+            else {
+                config.redis.stream_key = "yolo:stream:detect";
+            }
         }
         if (config.redis.consumer_group.empty()) {
-            config.redis.consumer_group = config.model.type == "obb" ? "yolo11_obb_group" : "yolo11_group";
+            if (config.model.type == "obb") {
+                config.redis.consumer_group = "yolo11_obb_group";
+            }
+            else if (config.model.type == "cls") {
+                config.redis.consumer_group = "yolo11_cls_group";
+            }
+            else if (config.model.type == "pose") {
+                config.redis.consumer_group = "yolo11_pose_group";
+            }
+            else if (config.model.type == "seg") {
+                config.redis.consumer_group = "yolo11_seg_group";
+            }
+            else {
+                config.redis.consumer_group = "yolo11_group";
+            }
         }
+
+        normalizeWorkerCapability(config);
         return config;
     }
 

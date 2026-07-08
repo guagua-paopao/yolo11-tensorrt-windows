@@ -1,5 +1,8 @@
 #pragma once
 
+#include <unordered_map>
+#include <vector>
+
 #include <opencv2/opencv.hpp>
 #include "NvInfer.h"
 #include "types.h"

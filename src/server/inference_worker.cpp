@@ -190,10 +190,22 @@ namespace yolo11_server {
         return toLowerString(config_.model.type) == "obb";
     }
 
+    bool InferenceWorker::isClsModel() const {
+        return toLowerString(config_.model.type) == "cls";
+    }
+
+    bool InferenceWorker::isPoseModel() const {
+        return toLowerString(config_.model.type) == "pose";
+    }
+
+    bool InferenceWorker::isSegModel() const {
+        return toLowerString(config_.model.type) == "seg";
+    }
+
     bool InferenceWorker::initModelRunner() {
         runner_ = createModelRunner(config_.model.type);
         if (!runner_) {
-            spdlog::error("Unsupported worker model.type={}. Supported values: detect, obb", config_.model.type);
+            spdlog::error("Unsupported worker model.type={}. Supported values: detect, obb, cls, pose, seg", config_.model.type);
             return false;
         }
 
@@ -295,16 +307,16 @@ namespace yolo11_server {
                 }
             }
 
-            std::vector<Detection> detections;
+            ModelOutput model_output;
             cv::Mat result_image;
             auto t0 = std::chrono::steady_clock::now();
 
             if (!runner_) {
                 throw std::runtime_error("model runner is not initialized");
             }
-            detections = runner_->infer(image);
+            model_output = runner_->infer(image);
             if (config_.output.save_result_image) {
-                result_image = runner_->draw(image, detections);
+                result_image = runner_->draw(image, model_output);
             }
 
             auto t1 = std::chrono::steady_clock::now();
@@ -375,22 +387,63 @@ namespace yolo11_server {
                 {"height", image.rows},
                 {"channels", image.channels()}
             };
-            if (isObbModel()) {
+            if (isClsModel()) {
+                body["classification_format"] = "top1_and_topk";
+            }
+            else if (isObbModel()) {
                 body["obb_coordinate_system"] = "original_image_pixels";
                 body["obb_format"] = "cxcywh_angle_points";
+            }
+            else if (isPoseModel()) {
+                body["bbox_coordinate_system"] = "original_image_pixels";
+                body["bbox_format"] = "xywh_and_xyxy";
+                body["pose_coordinate_system"] = "original_image_pixels";
+                body["keypoint_format"] = "coco17_xy_conf";
+                body["skeleton_format"] = "coco17_pairs";
+                body["num_poses"] = model_output.detections.size();
+            }
+            else if (isSegModel()) {
+                body["bbox_coordinate_system"] = "original_image_pixels";
+                body["bbox_format"] = "xywh_and_xyxy";
+                body["segmentation_coordinate_system"] = "original_image_pixels";
+                body["segmentation_format"] = "bbox_polygon_mask_metadata";
+                body["mask_format"] = "thresholded_polygon_metadata";
+                body["num_segmentations"] = model_output.segmentations.size();
             }
             else {
                 body["bbox_coordinate_system"] = "original_image_pixels";
                 body["bbox_format"] = "xywh_and_xyxy";
             }
-            body["num_detections"] = detections.size();
+            body["num_detections"] = model_output.detections.size();
+            body["num_classifications"] = model_output.classifications.size();
+            body["num_segmentations"] = model_output.segmentations.size();
             body["queue_wait_ms"] = queue_wait_ms;
             body["inference_ms"] = infer_ms;
             body["total_ms"] = total_ms;
             body["create_time_ms"] = task.create_time_ms;
             body["start_time_ms"] = start_time_ms;
             body["finish_time_ms"] = finish_time_ms;
-            body["detections"] = ResultSerializer::detectionsToJsonByModel(detections, image, label_map_, config_.model.type, false);
+            if (isClsModel()) {
+                body["topk"] = ResultSerializer::classificationsToJson(model_output.classifications, label_map_);
+                if (!model_output.classifications.empty()) {
+                    const auto& top1 = model_output.classifications.front();
+                    body["top1"] = {
+                        {"class_id", top1.class_id},
+                        {"class_name", top1.class_name.empty() ? label_map_.className(top1.class_id) : top1.class_name},
+                        {"confidence", top1.confidence}
+                    };
+                }
+                else {
+                    body["top1"] = nullptr;
+                }
+            }
+            else if (isSegModel()) {
+                body["segmentations"] = ResultSerializer::segmentationsToJson(model_output.segmentations, image, label_map_, false);
+                body["detections"] = body["segmentations"];
+            }
+            else {
+                body["detections"] = ResultSerializer::detectionsToJsonByModel(model_output.detections, image, label_map_, config_.model.type, false);
+            }
             if (!result_image_key.empty()) {
                 body["result_image_key"] = result_image_key;
             }
@@ -459,7 +512,9 @@ namespace yolo11_server {
                 std::ostringstream oss;
                 oss << "Worker " << worker_id_
                     << " task done: task_id=" << task.task_id
-                    << ", detections=" << detections.size()
+                    << ", detections=" << model_output.detections.size()
+                    << ", classifications=" << model_output.classifications.size()
+                    << ", segmentations=" << model_output.segmentations.size()
                     << ", queue_wait_ms=" << queue_wait_ms
                     << ", infer_ms=" << infer_ms
                     << ", total_ms=" << total_ms
@@ -547,6 +602,14 @@ namespace yolo11_server {
             heartbeat.worker_id = worker_id_;
             heartbeat.gpu_id = config_.model.gpu_id;
             heartbeat.model_type = config_.model.type;
+            heartbeat.runner_model_type = config_.model.type;
+            heartbeat.worker_group = config_.worker.worker_group;
+            heartbeat.worker_kind = config_.worker.worker_kind;
+            heartbeat.task_kind = config_.worker.task_kind;
+            heartbeat.stream_type = config_.worker.stream_type;
+            heartbeat.engine_path = config_.model.engine_path;
+            heartbeat.labels_path = config_.model.labels_path;
+            heartbeat.max_concurrency = config_.worker.max_concurrency;
             heartbeat.processed_count = processed_count_.load();
             heartbeat.failed_count = failed_count_.load();
             heartbeat.start_time_ms = start_time_ms_;
