@@ -28,6 +28,11 @@ namespace yolo11_server {
         std::string input_video_path;
         std::string output_video_path;
         std::string output_video_filename;
+        int video_width = 0;
+        int video_height = 0;
+        double video_fps = 0.0;
+        long long video_total_frames = 0;
+        long long video_duration_ms = 0;
 
         long long create_time_ms = 0;
     };

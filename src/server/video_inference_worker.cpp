@@ -237,6 +237,43 @@ namespace yolo11_server {
         }
 
         try {
+            bool cancel_before_start = false;
+            std::string cancel_before_start_error;
+            if (redis_queue_.isCancelRequested(task.task_id, cancel_before_start, cancel_before_start_error) && cancel_before_start) {
+                const long long finish_time_ms = nowMs();
+                const long long total_ms = task.create_time_ms > 0 ? std::max(0LL, finish_time_ms - task.create_time_ms) : 0LL;
+                nlohmann::json body;
+                body["success"] = false;
+                body["task_id"] = task.task_id;
+                body["task_kind"] = "video";
+                body["model_type"] = "detect";
+                body["status"] = "canceled";
+                body["error"] = "canceled before processing";
+                body["queue_backend"] = "redis_stream";
+                body["worker_id"] = worker_id_;
+                body["consumer_name"] = config_.redis.consumer_name;
+                body["queue_wait_ms"] = queue_wait_ms;
+                body["process_ms"] = 0;
+                body["total_ms"] = total_ms;
+                body["video"] = {
+                    {"processed_frames", 0},
+                    {"progress", 0.0},
+                    {"completed_by_eof", false}
+                };
+                std::string cancel_mark_error;
+                if (!redis_queue_.markVideoCanceled(task.task_id, body.dump(4), finish_time_ms, queue_wait_ms, 0, total_ms, 0, 0, worker_id_, config_.redis.consumer_name, cancel_mark_error)) {
+                    throw std::runtime_error("markVideoCanceled before start failed: " + cancel_mark_error);
+                }
+                std::string ack_error;
+                if (!redis_queue_.ackTask(task.stream_id, ack_error)) {
+                    throw std::runtime_error("ack canceled-before-start video task failed: " + ack_error);
+                }
+                setWorkerStatus("idle");
+                writeHeartbeatNoexcept();
+                spdlog::info("Video task canceled before processing: task_id={}", task.task_id);
+                return;
+            }
+
             if (task.task_kind != "video") {
                 throw std::runtime_error("video worker received non-video task_kind=" + task.task_kind);
             }
@@ -312,8 +349,10 @@ namespace yolo11_server {
                         {"height", height},
                         {"fps", fps},
                         {"total_frames", total_frames},
+                        {"total_frames_estimated", total_frames},
                         {"processed_frames", processed_frames},
-                        {"progress", total_frames > 0 ? static_cast<double>(processed_frames) / static_cast<double>(total_frames) : 0.0}
+                        {"progress", total_frames > 0 ? static_cast<double>(processed_frames) / static_cast<double>(total_frames) : 0.0},
+                        {"completed_by_eof", false}
                     };
 
                     writer.release();
@@ -396,6 +435,15 @@ namespace yolo11_server {
             const long long process_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - process_start).count();
             const long long total_ms = task.create_time_ms > 0 ? std::max(0LL, finish_time_ms - task.create_time_ms) : process_ms;
+            long long output_video_bytes = 0;
+            try {
+                if (std::filesystem::exists(task.output_video_path)) {
+                    output_video_bytes = static_cast<long long>(std::filesystem::file_size(task.output_video_path));
+                }
+            }
+            catch (...) {
+                output_video_bytes = 0;
+            }
 
             nlohmann::json body;
             body["success"] = true;
@@ -419,9 +467,12 @@ namespace yolo11_server {
                 {"height", height},
                 {"fps", fps},
                 {"total_frames", total_frames},
+                {"total_frames_estimated", total_frames},
                 {"processed_frames", processed_frames},
+                {"effective_total_frames", processed_frames},
                 {"progress", 1.0},
-                {"duration_ms", duration_ms}
+                {"duration_ms", duration_ms},
+                {"completed_by_eof", true}
             };
             body["summary"] = {
                 {"total_detections", total_detections},
@@ -431,6 +482,7 @@ namespace yolo11_server {
             body["input_video_path"] = task.input_video_path;
             body["output_video_path"] = task.output_video_path;
             body["output_video_filename"] = task.output_video_filename;
+            body["output_video_bytes"] = output_video_bytes;
             body["output_video_url"] = "/api/v1/video/result/" + task.task_id + "/file";
 
             redis_error.clear();

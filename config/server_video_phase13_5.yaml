@@ -1,0 +1,77 @@
+server:
+  host: "0.0.0.0"
+  port: 8082
+  threads: 4
+  enable_sync_detect: false
+  max_body_size_mb: 256
+
+model:
+  type: "detect"
+  engine_path: "D:/tensorrtx/yolo11/engines/yolo11n.engine"
+  labels_path: "D:/tensorrtx/yolo11/labels/coco.txt"
+  gpu_id: 0
+  use_gpu_postprocess: false
+
+output:
+  save_result_image: true
+  input_dir: "./temp/input"
+  output_dir: "./output"
+  jpeg_quality: 90
+
+video:
+  enabled: true
+  input_dir: "./temp/video/input"
+  output_dir: "./temp/video/output"
+  max_video_bytes: 268435456
+  progress_update_interval_frames: 10
+  max_process_frames: 0
+  output_extension: ".mp4"
+  output_fourcc: "mp4v"
+  fallback_fps: 25.0
+
+redis:
+  enabled: true
+  host: "172.19.196.109"
+  port: 6379
+  password: ""
+  db: 0
+  stream_key: "yolo:stream:video:detect"
+  consumer_group: "yolo11_video_detect_group"
+  consumer_name: "video_worker_1"
+  block_ms: 500
+  ttl_seconds: 1800
+  task_ttl_seconds: 7200
+  input_image_ttl_seconds: 600
+  result_image_ttl_seconds: 1800
+  max_image_bytes: 5242880
+  max_result_image_bytes: 5242880
+  delete_input_after_done: true
+  max_redis_used_memory_mb: 2048
+  stream_max_len: 10000
+  enable_pending_reclaim: true
+  pending_min_idle_ms: 60000
+
+worker:
+  enabled: false
+  worker_num: 1
+  min_alive_workers: 1
+  consumer_name_prefix: "video_worker_"
+  log_task_done: true
+  heartbeat_enabled: true
+  heartbeat_interval_ms: 3000
+  heartbeat_ttl_seconds: 15
+
+metrics:
+  enabled: true
+  recent_window_seconds: 60
+  ttl_seconds: 3600
+
+logging:
+  enabled: true
+  log_dir: "./logs/video_server"
+  level: "info"
+  console: true
+  file: true
+  flush_interval_sec: 3
+  max_file_size_mb: 50
+  max_files: 5

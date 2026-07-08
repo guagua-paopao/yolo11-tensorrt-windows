@@ -99,7 +99,7 @@ namespace yolo11_server {
 
         std::string phaseNameForModelType(const std::string& model_type) {
             (void)model_type;
-            return "phase13_0_video_file_async";
+            return "phase13_5_video_stability_cancel_recovery";
         }
 
         crow::response makeJsonResponse(int code, const nlohmann::json& body) {
@@ -215,6 +215,12 @@ namespace yolo11_server {
             .methods(crow::HTTPMethod::POST)
             ([this](const std::string& task_id) {
             return handleCancelVideoTask(task_id);
+                });
+
+        CROW_ROUTE(app, "/api/v1/video/result/<string>/cleanup")
+            .methods(crow::HTTPMethod::POST)
+            ([this](const std::string& task_id) {
+            return handleCleanupVideoTask(task_id);
                 });
 
         CROW_ROUTE(app, "/api/v1/result/<string>")
@@ -1137,6 +1143,11 @@ namespace yolo11_server {
         task.input_video_path = input_path;
         task.output_video_path = output_path;
         task.output_video_filename = output_filename;
+        task.video_width = width;
+        task.video_height = height;
+        task.video_fps = fps;
+        task.video_total_frames = total_frames;
+        task.video_duration_ms = (total_frames > 0 && fps > 0.0) ? static_cast<long long>((static_cast<double>(total_frames) / fps) * 1000.0) : 0LL;
         task.create_time_ms = nowMs();
 
         std::string redis_error;
@@ -1229,10 +1240,12 @@ namespace yolo11_server {
             {"height", task_status.video_height},
             {"fps", task_status.fps},
             {"total_frames", task_status.total_frames},
+            {"total_frames_estimated", task_status.total_frames},
             {"processed_frames", task_status.processed_frames},
             {"current_frame_index", task_status.current_frame_index},
             {"progress", task_status.progress},
-            {"duration_ms", task_status.duration_ms}
+            {"duration_ms", task_status.duration_ms},
+            {"completed_by_eof", task_status.status == "done"}
         };
         if (!task_status.input_video_path.empty()) {
             body["input_video_path"] = task_status.input_video_path;
@@ -1253,10 +1266,12 @@ namespace yolo11_server {
                 {"height", task_status.video_height},
                 {"fps", task_status.fps},
                 {"total_frames", task_status.total_frames},
+                {"total_frames_estimated", task_status.total_frames},
                 {"processed_frames", task_status.processed_frames},
                 {"current_frame_index", task_status.current_frame_index},
                 {"progress", task_status.progress},
-                {"duration_ms", task_status.duration_ms}
+                {"duration_ms", task_status.duration_ms},
+                {"completed_by_eof", task_status.status == "done"}
             };
             body["cancel_requested"] = task_status.cancel_requested;
             if (!task_status.output_video_path.empty()) {
@@ -1363,6 +1378,57 @@ namespace yolo11_server {
         body["status"] = task_status.status;
         body["cancel_requested"] = true;
         body["result_url"] = "/api/v1/video/result/" + task_id;
+        return makeJsonResponse(200, body);
+    }
+
+    crow::response HttpController::handleCleanupVideoTask(const std::string& task_id) const {
+        if (!redis_mode_) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_DISABLED";
+            body["error"] = "cleanup requires redis.enabled=true";
+            return makeJsonResponse(503, body);
+        }
+
+        RedisTaskStatus task_status;
+        std::string redis_error;
+        if (!redis_queue_.getTaskStatus(task_id, task_status, redis_error) || !task_status.found) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "TASK_NOT_FOUND";
+            body["error"] = "task not found or expired";
+            body["task_id"] = task_id;
+            return makeJsonResponse(404, body);
+        }
+        if (task_status.status == "queued" || task_status.status == "running") {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "TASK_NOT_FINISHED";
+            body["error"] = "video task is not finished; cancel it first or wait until it finishes";
+            body["task_id"] = task_id;
+            body["status"] = task_status.status;
+            return makeJsonResponse(409, body);
+        }
+
+        bool input_removed = false;
+        bool output_removed = false;
+        std::error_code ec;
+        if (!task_status.input_video_path.empty() && std::filesystem::exists(task_status.input_video_path, ec)) {
+            input_removed = std::filesystem::remove(task_status.input_video_path, ec);
+        }
+        ec.clear();
+        if (!task_status.output_video_path.empty() && std::filesystem::exists(task_status.output_video_path, ec)) {
+            output_removed = std::filesystem::remove(task_status.output_video_path, ec);
+        }
+
+        nlohmann::json body;
+        body["success"] = true;
+        body["task_id"] = task_id;
+        body["status"] = task_status.status;
+        body["input_video_removed"] = input_removed;
+        body["output_video_removed"] = output_removed;
+        body["input_video_path"] = task_status.input_video_path;
+        body["output_video_path"] = task_status.output_video_path;
         return makeJsonResponse(200, body);
     }
 

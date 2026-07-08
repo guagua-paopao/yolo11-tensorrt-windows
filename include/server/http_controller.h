@@ -40,6 +40,7 @@ namespace yolo11_server {
         crow::response handleGetVideoResult(const std::string& task_id) const;
         crow::response handleGetVideoFile(const std::string& task_id) const;
         crow::response handleCancelVideoTask(const std::string& task_id) const;
+        crow::response handleCleanupVideoTask(const std::string& task_id) const;
         crow::response handleGetResultImageByTaskId(const std::string& task_id) const;
         crow::response handleGetResultImage(const std::string& filename) const;
 

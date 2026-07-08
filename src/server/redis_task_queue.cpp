@@ -548,7 +548,7 @@ namespace yolo11_server {
             context_,
             error,
             10000,
-            "HSET %s task_id %s task_kind %s model_type %s input_image_path %s input_image_key %s result_image_key %s input_video_path %s output_video_path %s output_video_filename %s create_time_ms %lld start_time_ms %lld finish_time_ms %lld queue_wait_ms %lld infer_ms %s process_ms %lld total_ms %lld worker_id %s consumer_name %s error %s result_image_path %s result_image_filename %s progress %s processed_frames %lld total_frames %lld current_frame_index %lld cancel_requested %s",
+            "HSET %s task_id %s task_kind %s model_type %s input_image_path %s input_image_key %s result_image_key %s input_video_path %s output_video_path %s output_video_filename %s create_time_ms %lld start_time_ms %lld finish_time_ms %lld queue_wait_ms %lld infer_ms %s process_ms %lld total_ms %lld worker_id %s consumer_name %s error %s result_image_path %s result_image_filename %s progress %s processed_frames %lld total_frames %lld current_frame_index %lld cancel_requested %s fps %.6f video_width %d video_height %d duration_ms %lld",
             meta_key.c_str(),
             task.task_id.c_str(),
             task.task_kind.empty() ? "image" : task.task_kind.c_str(),
@@ -573,9 +573,13 @@ namespace yolo11_server {
             empty,
             "0",
             0LL,
+            task.video_total_frames,
             0LL,
-            0LL,
-            "0"
+            "0",
+            task.video_fps,
+            task.video_width,
+            task.video_height,
+            task.video_duration_ms
         );
         if (replyIsError(meta_reply.get(), error, context_)) {
             return false;
