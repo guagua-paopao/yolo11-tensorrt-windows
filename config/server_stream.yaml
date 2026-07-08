@@ -33,6 +33,8 @@ stream:
   reconnect_max_attempts: 3
   reconnect_delay_ms: 1000
   max_runtime_seconds: 0
+  # Worker crash/stale stream cleanup threshold.
+  stale_timeout_ms: 30000
   jpeg_quality: 90
 
 redis:
@@ -48,7 +50,7 @@ redis:
   ttl_seconds: 1800
   task_ttl_seconds: 1800
   stream_max_len: 10000
-  enable_pending_reclaim: false
+  enable_pending_reclaim: true
   pending_min_idle_ms: 60000
   max_redis_used_memory_mb: 2048
 

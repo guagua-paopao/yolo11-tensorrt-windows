@@ -84,6 +84,12 @@ namespace yolo11_server {
         // 0 means unlimited. Useful for smoke tests and long-run guards.
         int max_runtime_seconds = 0;
 
+        // Phase 14.5: if a non-terminal stream has no live worker heartbeat
+        // or no latest update for this long, HTTP can mark it failed and
+        // release the active-stream guard. This prevents stale running tasks
+        // after a worker crash from blocking the next /stream/start forever.
+        int stale_timeout_ms = 30000;
+
         // JPEG quality for snapshot output.
         int jpeg_quality = 90;
     };

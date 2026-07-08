@@ -556,6 +556,15 @@ namespace yolo11_server {
     crow::response HttpController::handleMetrics(const crow::request& request) const {
         const std::string model_filter = getOptionalModelFilter(request);
         const std::string configured_model_type = toLowerString(config_.model.type);
+        // Phase 14.5 metrics hotfix:
+        // The stream server uses model.type=detect because the stream worker runs
+        // the normal detector on every frame, but the public runtime metric should
+        // describe the task kind that is being served. Without this split,
+        // /metrics on port 8083 reports models.detect and model=stream filtering
+        // looks empty even though stream_worker_1 is processing stream tasks.
+        const std::string metrics_profile_type = config_.stream.enabled
+            ? std::string("stream")
+            : (config_.video.enabled ? std::string("video") : configured_model_type);
 
         if (!redis_mode_) {
             nlohmann::json body;
@@ -565,17 +574,18 @@ namespace yolo11_server {
             return makeJsonResponse(503, body);
         }
 
-        if (!model_filter.empty() && model_filter != configured_model_type) {
+        if (!model_filter.empty() && model_filter != metrics_profile_type) {
             nlohmann::json body;
             body["success"] = true;
             body["configured_model_type"] = configured_model_type;
+            body["metrics_profile_type"] = metrics_profile_type;
             body["model_filter"] = model_filter;
             body["metrics_found"] = false;
             body["total_tasks_done"] = 0;
             body["total_tasks_failed"] = 0;
             body["total_tasks"] = 0;
             body["workers"] = nlohmann::json::array();
-            body["note"] = "requested model is not the active model profile of this server process";
+            body["note"] = "requested model/task kind is not the active metrics profile of this server process";
             return makeJsonResponse(200, body);
         }
 
@@ -628,7 +638,8 @@ namespace yolo11_server {
         }
 
         nlohmann::json model_summary;
-        model_summary["model_type"] = configured_model_type;
+        model_summary["model_type"] = metrics_profile_type;
+        model_summary["runner_model_type"] = configured_model_type;
         model_summary["stream_key"] = config_.redis.stream_key;
         model_summary["consumer_group"] = config_.redis.consumer_group;
         model_summary["total_done"] = metrics.done_count;
@@ -645,9 +656,10 @@ namespace yolo11_server {
         body["service"] = "yolo11_server";
         body["phase"] = phaseNameForConfig(config_);
         body["configured_model_type"] = configured_model_type;
+        body["metrics_profile_type"] = metrics_profile_type;
         body["model_filter"] = model_filter.empty() ? nlohmann::json(nullptr) : nlohmann::json(model_filter);
         body["models"] = nlohmann::json::object();
-        body["models"][configured_model_type] = model_summary;
+        body["models"][metrics_profile_type] = model_summary;
         body["metrics_enabled"] = config_.redis.metrics_enabled;
         body["metrics_found"] = metrics.found;
         body["recent_window_seconds"] = metrics.recent_window_seconds;
@@ -1480,6 +1492,104 @@ namespace yolo11_server {
         return makeJsonResponse(200, body);
     }
 
+    bool HttpController::tryCleanupStaleActiveStream(nlohmann::json* cleanup_json, std::string& error) const {
+        if (cleanup_json != nullptr) {
+            *cleanup_json = nlohmann::json::object();
+        }
+        if (!redis_mode_ || !config_.stream.enabled) {
+            return true;
+        }
+
+        StreamTaskStatus active;
+        if (!redis_queue_.getActiveStreamTask(active, error)) {
+            return false;
+        }
+        if (!active.found) {
+            return true;
+        }
+
+        const std::string status = toLowerString(active.status);
+        if (status.empty() || status == "stopped" || status == "failed" || status == "canceled") {
+            return true;
+        }
+
+        std::vector<WorkerHeartbeatRecord> workers;
+        std::string workers_error;
+        if (!redis_queue_.getWorkerHeartbeats(config_.worker.consumer_name_prefix, config_.worker.worker_num, workers, workers_error)) {
+            error = workers_error.empty() ? "failed to query worker heartbeats" : workers_error;
+            return false;
+        }
+
+        const long long now_ms = nowMs();
+        const long long stale_timeout_ms = std::max(5000, config_.stream.stale_timeout_ms);
+        long long last_activity_ms = std::max(active.last_update_ms, std::max(active.start_time_ms, active.create_time_ms));
+        if (last_activity_ms <= 0) {
+            last_activity_ms = active.create_time_ms > 0 ? active.create_time_ms : now_ms;
+        }
+        const long long idle_ms = std::max(0LL, now_ms - last_activity_ms);
+
+        bool any_alive = false;
+        bool owner_alive = false;
+        bool owner_reports_current_stream = false;
+        for (const auto& worker : workers) {
+            if (!worker.alive) {
+                continue;
+            }
+            any_alive = true;
+            const bool same_consumer = !active.consumer_name.empty() && worker.consumer_name == active.consumer_name;
+            const bool same_stream = !worker.current_task_id.empty() && worker.current_task_id == active.stream_id;
+            if (same_consumer || same_stream) {
+                owner_alive = true;
+                if (same_stream) {
+                    owner_reports_current_stream = true;
+                }
+            }
+        }
+
+        bool stale = false;
+        std::string reason;
+        if (status == "queued" && any_alive && idle_ms > stale_timeout_ms) {
+            stale = true;
+            reason = "queued stream command was not picked up before stale_timeout_ms";
+        }
+        else if ((status == "starting" || status == "running" || status == "reconnecting" || status == "stopping") &&
+                 idle_ms > stale_timeout_ms && !owner_alive) {
+            stale = true;
+            reason = "stream owner worker heartbeat is missing";
+        }
+        else if ((status == "running" || status == "reconnecting" || status == "stopping") &&
+                 idle_ms > stale_timeout_ms && owner_alive && !owner_reports_current_stream) {
+            stale = true;
+            reason = "owner worker is alive but no longer reports this stream as current_task_id";
+        }
+        else if ((status == "running" || status == "reconnecting") && idle_ms > stale_timeout_ms * 3LL) {
+            stale = true;
+            reason = "stream latest update exceeded 3x stale_timeout_ms";
+        }
+
+        if (!stale) {
+            return true;
+        }
+
+        const std::string stale_message = "stale stream cleanup: " + reason + ", idle_ms=" + std::to_string(idle_ms);
+        std::string mark_error;
+        if (!redis_queue_.markStreamFailed(active.stream_id, stale_message, now_ms, active.frame_count, mark_error)) {
+            error = "failed to mark stale stream failed: " + mark_error;
+            return false;
+        }
+
+        spdlog::warn("Stale stream cleaned: stream_id={}, status={}, reason={}, idle_ms={}", active.stream_id, status, reason, idle_ms);
+        if (cleanup_json != nullptr) {
+            (*cleanup_json)["cleaned"] = true;
+            (*cleanup_json)["stream_id"] = active.stream_id;
+            (*cleanup_json)["previous_status"] = active.status;
+            (*cleanup_json)["reason"] = reason;
+            (*cleanup_json)["idle_ms"] = idle_ms;
+            (*cleanup_json)["stale_timeout_ms"] = stale_timeout_ms;
+        }
+        return true;
+    }
+
     crow::response HttpController::handleStreamStart(const crow::request& request) {
         if (!redis_mode_) {
             nlohmann::json body;
@@ -1494,6 +1604,16 @@ namespace yolo11_server {
             body["error_code"] = "STREAM_DISABLED";
             body["error"] = "stream.enabled=false in this server config";
             return makeJsonResponse(503, body);
+        }
+
+        nlohmann::json stale_cleanup = nlohmann::json::object();
+        std::string stale_cleanup_error;
+        if (!tryCleanupStaleActiveStream(&stale_cleanup, stale_cleanup_error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "STALE_STREAM_CLEANUP_FAILED";
+            body["error"] = stale_cleanup_error;
+            return makeJsonResponse(500, body);
         }
 
         std::string body_size_error;
@@ -1612,7 +1732,7 @@ namespace yolo11_server {
         stream_request.snapshot_path = snapshot_path.string();
         stream_request.snapshot_interval_frames = config_.stream.snapshot_interval_frames;
         stream_request.target_fps = config_.stream.target_fps;
-        stream_request.model_type = "stream";
+        stream_request.model_type = config_.model.type;
         stream_request.create_time_ms = nowMs();
 
         std::string redis_error;
@@ -1647,8 +1767,9 @@ namespace yolo11_server {
         body["success"] = true;
         body["stream_id"] = stream_id;
         body["task_kind"] = "stream";
-        body["model_type"] = "stream";
-        body["status"] = "created";
+        body["model_type"] = config_.model.type;
+        body["status"] = "queued";
+        body["lifecycle_status"] = "queued";
         body["queue_backend"] = "redis_stream_start_command";
         body["source_type"] = source_type;
         body["source_uri"] = source_uri;
@@ -1657,6 +1778,9 @@ namespace yolo11_server {
         body["snapshot_url"] = "/api/v1/stream/" + stream_id + "/snapshot";
         body["stop_url"] = "/api/v1/stream/" + stream_id + "/stop";
         body["snapshot_path"] = snapshot_path.string();
+        if (stale_cleanup.contains("cleaned")) {
+            body["stale_cleanup"] = stale_cleanup;
+        }
         spdlog::info("Stream task submitted: stream_id={}, source_type={}, uri={}", stream_id, source_type, source_uri);
         return makeJsonResponse(202, body);
     }
@@ -1694,6 +1818,7 @@ namespace yolo11_server {
             body["error_code"] = "STREAM_ALREADY_FINISHED";
             body["stream_id"] = stream_id;
             body["status"] = status.status;
+            body["lifecycle_status"] = status.status;
             return makeJsonResponse(409, body);
         }
         if (!redis_queue_.requestStopStreamTask(stream_id, redis_error)) {
@@ -1722,6 +1847,12 @@ namespace yolo11_server {
             return makeJsonResponse(503, body);
         }
 
+        nlohmann::json stale_cleanup = nlohmann::json::object();
+        std::string stale_cleanup_error;
+        if (!tryCleanupStaleActiveStream(&stale_cleanup, stale_cleanup_error)) {
+            spdlog::warn("Stale stream cleanup during status failed: {}", stale_cleanup_error);
+        }
+
         StreamTaskStatus status;
         std::string redis_error;
         if (!redis_queue_.getStreamTaskStatus(stream_id, status, redis_error)) {
@@ -1745,8 +1876,9 @@ namespace yolo11_server {
         body["success"] = status.status != "failed";
         body["stream_id"] = stream_id;
         body["task_kind"] = "stream";
-        body["model_type"] = status.model_type.empty() ? "stream" : status.model_type;
+        body["model_type"] = status.model_type.empty() ? config_.model.type : status.model_type;
         body["status"] = status.status;
+        body["lifecycle_status"] = status.status;
         body["source_type"] = status.source_type;
         body["source_uri"] = status.source_uri;
         body["camera_id"] = status.camera_id;
@@ -1768,6 +1900,9 @@ namespace yolo11_server {
         body["stop_url"] = "/api/v1/stream/" + stream_id + "/stop";
         body["worker_id"] = status.worker_id;
         body["consumer_name"] = status.consumer_name;
+        if (stale_cleanup.contains("cleaned") && stale_cleanup.value("stream_id", std::string{}) == stream_id) {
+            body["stale_cleanup"] = stale_cleanup;
+        }
         if (!status.error.empty()) {
             body["error"] = status.error;
         }
