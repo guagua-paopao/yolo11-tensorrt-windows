@@ -35,6 +35,10 @@ namespace yolo11_server {
         crow::response handleDetectImageAsync(const crow::request& request);
         crow::response handleDetectObbImageAsync(const crow::request& request);
         crow::response handleDetectVideoAsync(const crow::request& request);
+        crow::response handleStreamStart(const crow::request& request);
+        crow::response handleStreamStop(const std::string& stream_id) const;
+        crow::response handleStreamStatus(const std::string& stream_id) const;
+        crow::response handleStreamSnapshot(const std::string& stream_id) const;
         crow::response handleImageAsync(const crow::request& request, const std::string& expected_model_type);
         crow::response handleGetAsyncResult(const std::string& task_id) const;
         crow::response handleGetVideoResult(const std::string& task_id) const;
@@ -53,6 +57,7 @@ namespace yolo11_server {
         bool isTrueParam(const char* value) const;
 
         std::string makeTaskId();
+        std::string makeStreamId();
         std::string makeResultImageFilename(unsigned long long request_id) const;
         std::string makeInputImagePath(const std::string& task_id) const;
         std::string makeResultImagePath(const std::string& filename) const;

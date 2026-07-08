@@ -107,6 +107,65 @@ namespace yolo11_server {
             config.video.fallback_fps = 25.0;
         }
 
+
+        auto stream = root["stream"];
+        config.stream.enabled = readOrDefault<bool>(stream, "enabled", config.stream.enabled);
+        config.stream.default_source_type = readOrDefault<std::string>(stream, "default_source_type", config.stream.default_source_type);
+        config.stream.default_camera_id = readOrDefault<int>(stream, "default_camera_id", config.stream.default_camera_id);
+        config.stream.default_rtsp_url = readOrDefault<std::string>(stream, "default_rtsp_url", config.stream.default_rtsp_url);
+        config.stream.default_file_path = readOrDefault<std::string>(stream, "default_file_path", config.stream.default_file_path);
+        config.stream.snapshot_dir = readOrDefault<std::string>(stream, "snapshot_dir", config.stream.snapshot_dir);
+        config.stream.snapshot_interval_frames = readOrDefault<int>(stream, "snapshot_interval_frames", config.stream.snapshot_interval_frames);
+        config.stream.target_fps = readOrDefault<int>(stream, "target_fps", config.stream.target_fps);
+        config.stream.max_no_frame_count = readOrDefault<int>(stream, "max_no_frame_count", config.stream.max_no_frame_count);
+        config.stream.enable_reconnect = readOrDefault<bool>(stream, "enable_reconnect", config.stream.enable_reconnect);
+        config.stream.reconnect_max_attempts = readOrDefault<int>(stream, "reconnect_max_attempts", config.stream.reconnect_max_attempts);
+        config.stream.reconnect_delay_ms = readOrDefault<int>(stream, "reconnect_delay_ms", config.stream.reconnect_delay_ms);
+        config.stream.max_runtime_seconds = readOrDefault<int>(stream, "max_runtime_seconds", config.stream.max_runtime_seconds);
+        config.stream.jpeg_quality = readOrDefault<int>(stream, "jpeg_quality", config.stream.jpeg_quality);
+        if (config.stream.default_source_type.empty()) {
+            config.stream.default_source_type = "camera";
+        }
+        if (config.stream.default_camera_id < 0) {
+            config.stream.default_camera_id = 0;
+        }
+        if (config.stream.snapshot_dir.empty()) {
+            config.stream.snapshot_dir = "./runtime/output/streams";
+        }
+        if (config.stream.snapshot_interval_frames <= 0) {
+            config.stream.snapshot_interval_frames = 5;
+        }
+        if (config.stream.target_fps < 0) {
+            config.stream.target_fps = 0;
+        }
+        if (config.stream.target_fps > 120) {
+            config.stream.target_fps = 120;
+        }
+        if (config.stream.max_no_frame_count <= 0) {
+            config.stream.max_no_frame_count = 30;
+        }
+        if (config.stream.reconnect_max_attempts < 0) {
+            config.stream.reconnect_max_attempts = 0;
+        }
+        if (config.stream.reconnect_max_attempts > 100) {
+            config.stream.reconnect_max_attempts = 100;
+        }
+        if (config.stream.reconnect_delay_ms < 100) {
+            config.stream.reconnect_delay_ms = 100;
+        }
+        if (config.stream.reconnect_delay_ms > 60000) {
+            config.stream.reconnect_delay_ms = 60000;
+        }
+        if (config.stream.max_runtime_seconds < 0) {
+            config.stream.max_runtime_seconds = 0;
+        }
+        if (config.stream.jpeg_quality < 1) {
+            config.stream.jpeg_quality = 1;
+        }
+        if (config.stream.jpeg_quality > 100) {
+            config.stream.jpeg_quality = 100;
+        }
+
         auto redis = root["redis"];
         config.redis.enabled = readOrDefault<bool>(redis, "enabled", config.redis.enabled);
         config.redis.host = readOrDefault<std::string>(redis, "host", config.redis.host);

@@ -485,3 +485,48 @@ endif()
 
 add_dependencies(yolo11_video_worker myplugins)
 copy_myplugins_to_target(yolo11_video_worker)
+
+# ============================================================
+# Phase 14: YOLO11 live stream / RTSP / camera worker process
+# Dedicated lifecycle worker for /api/v1/stream/start|stop|status|snapshot
+# ============================================================
+add_executable(yolo11_stream_worker
+    ${PROJECT_SOURCE_DIR}/src/server/main_stream_worker.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/app_config.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/app_logger.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/label_map.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/model_runner.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/redis_task_queue.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/stream_inference_worker.cpp
+)
+
+target_compile_definitions(yolo11_stream_worker PRIVATE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+)
+
+if(MSVC)
+    target_compile_options(yolo11_stream_worker PRIVATE /utf-8)
+endif()
+
+target_include_directories(yolo11_stream_worker PRIVATE
+    "${PROJECT_INCLUDE_DIR}"
+    "${PROJECT_PLUGIN_DIR}"
+)
+
+target_link_libraries(yolo11_stream_worker PRIVATE
+    yolo11_runtime
+    myplugins
+
+    nlohmann_json::nlohmann_json
+    yaml-cpp::yaml-cpp
+    spdlog::spdlog
+    ${YOLO11_HIREDIS_TARGET}
+)
+
+if(WIN32)
+    target_link_libraries(yolo11_stream_worker PRIVATE ws2_32)
+endif()
+
+add_dependencies(yolo11_stream_worker myplugins)
+copy_myplugins_to_target(yolo11_stream_worker)

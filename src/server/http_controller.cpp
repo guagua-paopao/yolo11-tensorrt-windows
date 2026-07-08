@@ -97,8 +97,16 @@ namespace yolo11_server {
             return toLowerString(worker.model_type) == model_filter;
         }
 
-        std::string phaseNameForModelType(const std::string& model_type) {
-            (void)model_type;
+        std::string phaseNameForConfig(const AppConfig& config) {
+            if (config.stream.enabled) {
+                return "phase14_5_stream_stability_reconnect";
+            }
+            if (config.video.enabled) {
+                return "phase13_5_video_stability_cancel_recovery";
+            }
+            if (toLowerString(config.model.type) == "obb") {
+                return "phase12_0_detect_obb_dual_parallel";
+            }
             return "phase13_5_video_stability_cancel_recovery";
         }
 
@@ -118,6 +126,9 @@ namespace yolo11_server {
         if (config_.video.enabled) {
             std::filesystem::create_directories(config_.video.input_dir);
             std::filesystem::create_directories(config_.video.output_dir);
+        }
+        if (config_.stream.enabled) {
+            std::filesystem::create_directories(config_.stream.snapshot_dir);
         }
 
         sync_enabled_ = config_.server.enable_sync_detect && detector_ != nullptr;
@@ -223,6 +234,30 @@ namespace yolo11_server {
             return handleCleanupVideoTask(task_id);
                 });
 
+        CROW_ROUTE(app, "/api/v1/stream/start")
+            .methods(crow::HTTPMethod::POST)
+            ([this](const crow::request& request) {
+            return handleStreamStart(request);
+                });
+
+        CROW_ROUTE(app, "/api/v1/stream/<string>/stop")
+            .methods(crow::HTTPMethod::POST)
+            ([this](const std::string& stream_id) {
+            return handleStreamStop(stream_id);
+                });
+
+        CROW_ROUTE(app, "/api/v1/stream/<string>/status")
+            .methods(crow::HTTPMethod::GET)
+            ([this](const std::string& stream_id) {
+            return handleStreamStatus(stream_id);
+                });
+
+        CROW_ROUTE(app, "/api/v1/stream/<string>/snapshot")
+            .methods(crow::HTTPMethod::GET)
+            ([this](const std::string& stream_id) {
+            return handleStreamSnapshot(stream_id);
+                });
+
         CROW_ROUTE(app, "/api/v1/result/<string>")
             .methods(crow::HTTPMethod::GET)
             ([this](const std::string& task_id) {
@@ -247,7 +282,7 @@ namespace yolo11_server {
         body["success"] = true;
         body["status"] = "ok";
         body["service"] = "yolo11_server";
-        body["phase"] = phaseNameForModelType(config_.model.type);
+        body["phase"] = phaseNameForConfig(config_);
         body["role"] = "http_producer";
         body["model_type"] = config_.model.type;
         body["active_model"] = config_.active_model.empty() ? nlohmann::json(nullptr) : nlohmann::json(config_.active_model);
@@ -268,6 +303,19 @@ namespace yolo11_server {
             body["video_output_dir"] = config_.video.output_dir;
             body["video_max_video_bytes"] = config_.video.max_video_bytes;
             body["video_progress_update_interval_frames"] = config_.video.progress_update_interval_frames;
+        }
+        body["stream_enabled"] = config_.stream.enabled;
+        if (config_.stream.enabled) {
+            body["stream_storage"] = "latest_snapshot_local_file";
+            body["stream_snapshot_dir"] = config_.stream.snapshot_dir;
+            body["stream_default_source_type"] = config_.stream.default_source_type;
+            body["stream_target_fps"] = config_.stream.target_fps;
+            body["stream_snapshot_interval_frames"] = config_.stream.snapshot_interval_frames;
+            body["stream_max_no_frame_count"] = config_.stream.max_no_frame_count;
+            body["stream_enable_reconnect"] = config_.stream.enable_reconnect;
+            body["stream_reconnect_max_attempts"] = config_.stream.reconnect_max_attempts;
+            body["stream_reconnect_delay_ms"] = config_.stream.reconnect_delay_ms;
+            body["stream_max_runtime_seconds"] = config_.stream.max_runtime_seconds;
         }
         body["server_health"] = "ok";
 
@@ -320,7 +368,7 @@ namespace yolo11_server {
         nlohmann::json body;
         body["success"] = true;
         body["service"] = "yolo11_server";
-        body["phase"] = phaseNameForModelType(config_.model.type);
+        body["phase"] = phaseNameForConfig(config_);
         body["configured_model_type"] = configured_model_type;
         body["model_filter"] = model_filter.empty() ? nlohmann::json(nullptr) : nlohmann::json(model_filter);
         body["server_status"] = "ok";
@@ -595,7 +643,7 @@ namespace yolo11_server {
         nlohmann::json body;
         body["success"] = true;
         body["service"] = "yolo11_server";
-        body["phase"] = phaseNameForModelType(config_.model.type);
+        body["phase"] = phaseNameForConfig(config_);
         body["configured_model_type"] = configured_model_type;
         body["model_filter"] = model_filter.empty() ? nlohmann::json(nullptr) : nlohmann::json(model_filter);
         body["models"] = nlohmann::json::object();
@@ -1432,6 +1480,351 @@ namespace yolo11_server {
         return makeJsonResponse(200, body);
     }
 
+    crow::response HttpController::handleStreamStart(const crow::request& request) {
+        if (!redis_mode_) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_DISABLED";
+            body["error"] = "stream start requires redis.enabled=true";
+            return makeJsonResponse(503, body);
+        }
+        if (!config_.stream.enabled) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "STREAM_DISABLED";
+            body["error"] = "stream.enabled=false in this server config";
+            return makeJsonResponse(503, body);
+        }
+
+        std::string body_size_error;
+        if (!validateBodySize(request, body_size_error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REQUEST_TOO_LARGE";
+            body["error"] = body_size_error;
+            return makeJsonResponse(413, body);
+        }
+
+        std::vector<WorkerHeartbeatRecord> workers;
+        std::string workers_error;
+        int alive_workers = 0;
+        if (redis_queue_.getWorkerHeartbeats(config_.worker.consumer_name_prefix, config_.worker.worker_num, workers, workers_error)) {
+            for (const auto& worker : workers) {
+                if (worker.alive) {
+                    ++alive_workers;
+                }
+            }
+        }
+        if (alive_workers < config_.worker.min_alive_workers) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "NOT_ENOUGH_ALIVE_STREAM_WORKERS";
+            body["error"] = "stream task rejected because not enough alive stream workers";
+            body["alive_workers"] = alive_workers;
+            body["expected_workers"] = config_.worker.worker_num;
+            body["min_alive_workers"] = config_.worker.min_alive_workers;
+            if (!workers_error.empty()) {
+                body["workers_error"] = workers_error;
+            }
+            return makeJsonResponse(503, body);
+        }
+
+        std::string source_type = toLowerString(config_.stream.default_source_type);
+        int camera_id = config_.stream.default_camera_id;
+        std::string source_uri;
+        if (source_type == "camera") {
+            source_uri = std::to_string(camera_id);
+        }
+        else if (source_type == "rtsp") {
+            source_uri = config_.stream.default_rtsp_url;
+        }
+        else if (source_type == "file") {
+            source_uri = config_.stream.default_file_path;
+        }
+
+        if (!request.body.empty()) {
+            nlohmann::json json_body = nlohmann::json::parse(request.body, nullptr, false);
+            if (!json_body.is_discarded() && json_body.is_object()) {
+                if (json_body.contains("source_type")) {
+                    source_type = toLowerString(json_body.value("source_type", source_type));
+                }
+                if (json_body.contains("camera_id")) {
+                    camera_id = json_body.value("camera_id", camera_id);
+                    source_uri = std::to_string(camera_id);
+                    if (!json_body.contains("source_type")) {
+                        source_type = "camera";
+                    }
+                }
+                if (json_body.contains("rtsp_url")) {
+                    source_uri = json_body.value("rtsp_url", std::string{});
+                    if (!json_body.contains("source_type")) {
+                        source_type = "rtsp";
+                    }
+                }
+                if (json_body.contains("file_path")) {
+                    source_uri = json_body.value("file_path", std::string{});
+                    if (!json_body.contains("source_type")) {
+                        source_type = "file";
+                    }
+                }
+                if (json_body.contains("source_uri")) {
+                    source_uri = json_body.value("source_uri", source_uri);
+                }
+            }
+            else if (request.body.size() > 2) {
+                nlohmann::json body;
+                body["success"] = false;
+                body["error_code"] = "INVALID_JSON";
+                body["error"] = "stream/start expects JSON body or an empty body";
+                return makeJsonResponse(400, body);
+            }
+        }
+
+        if (source_type != "camera" && source_type != "file" && source_type != "rtsp") {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "UNSUPPORTED_STREAM_SOURCE_TYPE";
+            body["error"] = "source_type must be camera, file, or rtsp";
+            body["source_type"] = source_type;
+            return makeJsonResponse(400, body);
+        }
+        if ((source_type == "file" || source_type == "rtsp") && source_uri.empty()) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "EMPTY_STREAM_SOURCE_URI";
+            body["error"] = "file/rtsp stream requires file_path, rtsp_url, or source_uri";
+            body["source_type"] = source_type;
+            return makeJsonResponse(400, body);
+        }
+        if (source_type == "camera" && source_uri.empty()) {
+            source_uri = std::to_string(camera_id);
+        }
+
+        const std::string stream_id = makeStreamId();
+        const std::filesystem::path snapshot_path = std::filesystem::path(config_.stream.snapshot_dir) / stream_id / "snapshot.jpg";
+        std::filesystem::create_directories(snapshot_path.parent_path());
+
+        StreamStartRequest stream_request;
+        stream_request.stream_id = stream_id;
+        stream_request.source_type = source_type;
+        stream_request.source_uri = source_uri;
+        stream_request.camera_id = camera_id;
+        stream_request.snapshot_path = snapshot_path.string();
+        stream_request.snapshot_interval_frames = config_.stream.snapshot_interval_frames;
+        stream_request.target_fps = config_.stream.target_fps;
+        stream_request.model_type = "stream";
+        stream_request.create_time_ms = nowMs();
+
+        std::string redis_error;
+        if (!redis_queue_.submitStreamTask(stream_request, redis_error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            const std::string active_prefix = "ACTIVE_STREAM_RUNNING";
+            if (redis_error.rfind(active_prefix, 0) == 0) {
+                std::string active_stream_id;
+                const auto pos = redis_error.find(':');
+                if (pos != std::string::npos && pos + 1 < redis_error.size()) {
+                    active_stream_id = redis_error.substr(pos + 1);
+                }
+                body["error_code"] = "STREAM_ALREADY_ACTIVE";
+                body["error"] = "another stream task is already active; stop it before starting a new stream";
+                if (!active_stream_id.empty()) {
+                    body["active_stream_id"] = active_stream_id;
+                    body["active_status_url"] = "/api/v1/stream/" + active_stream_id + "/status";
+                    body["active_stop_url"] = "/api/v1/stream/" + active_stream_id + "/stop";
+                }
+                body["requested_source_type"] = source_type;
+                body["requested_source_uri"] = source_uri;
+                return makeJsonResponse(409, body);
+            }
+            body["error_code"] = "REDIS_SUBMIT_STREAM_FAILED";
+            body["error"] = "failed to submit stream task to Redis";
+            body["redis_error"] = redis_error;
+            return makeJsonResponse(500, body);
+        }
+
+        nlohmann::json body;
+        body["success"] = true;
+        body["stream_id"] = stream_id;
+        body["task_kind"] = "stream";
+        body["model_type"] = "stream";
+        body["status"] = "created";
+        body["queue_backend"] = "redis_stream_start_command";
+        body["source_type"] = source_type;
+        body["source_uri"] = source_uri;
+        body["camera_id"] = camera_id;
+        body["status_url"] = "/api/v1/stream/" + stream_id + "/status";
+        body["snapshot_url"] = "/api/v1/stream/" + stream_id + "/snapshot";
+        body["stop_url"] = "/api/v1/stream/" + stream_id + "/stop";
+        body["snapshot_path"] = snapshot_path.string();
+        spdlog::info("Stream task submitted: stream_id={}, source_type={}, uri={}", stream_id, source_type, source_uri);
+        return makeJsonResponse(202, body);
+    }
+
+    crow::response HttpController::handleStreamStop(const std::string& stream_id) const {
+        if (!redis_mode_) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_DISABLED";
+            body["error"] = "stream stop requires redis.enabled=true";
+            return makeJsonResponse(503, body);
+        }
+
+        StreamTaskStatus status;
+        std::string redis_error;
+        if (!redis_queue_.getStreamTaskStatus(stream_id, status, redis_error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_QUERY_STREAM_FAILED";
+            body["error"] = redis_error;
+            body["stream_id"] = stream_id;
+            return makeJsonResponse(500, body);
+        }
+        if (!status.found) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "STREAM_NOT_FOUND";
+            body["error"] = "stream task not found or expired";
+            body["stream_id"] = stream_id;
+            return makeJsonResponse(404, body);
+        }
+        if (status.status == "stopped" || status.status == "failed") {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "STREAM_ALREADY_FINISHED";
+            body["stream_id"] = stream_id;
+            body["status"] = status.status;
+            return makeJsonResponse(409, body);
+        }
+        if (!redis_queue_.requestStopStreamTask(stream_id, redis_error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "STREAM_STOP_REQUEST_FAILED";
+            body["error"] = redis_error;
+            body["stream_id"] = stream_id;
+            return makeJsonResponse(500, body);
+        }
+        nlohmann::json body;
+        body["success"] = true;
+        body["stream_id"] = stream_id;
+        body["status"] = "stopping";
+        body["stop_requested"] = true;
+        body["status_url"] = "/api/v1/stream/" + stream_id + "/status";
+        return makeJsonResponse(200, body);
+    }
+
+    crow::response HttpController::handleStreamStatus(const std::string& stream_id) const {
+        if (!redis_mode_) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_DISABLED";
+            body["error"] = "stream status requires redis.enabled=true";
+            return makeJsonResponse(503, body);
+        }
+
+        StreamTaskStatus status;
+        std::string redis_error;
+        if (!redis_queue_.getStreamTaskStatus(stream_id, status, redis_error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_QUERY_STREAM_FAILED";
+            body["error"] = redis_error;
+            body["stream_id"] = stream_id;
+            return makeJsonResponse(500, body);
+        }
+        if (!status.found) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "STREAM_NOT_FOUND";
+            body["error"] = "stream task not found or expired";
+            body["stream_id"] = stream_id;
+            return makeJsonResponse(404, body);
+        }
+
+        nlohmann::json body;
+        body["success"] = status.status != "failed";
+        body["stream_id"] = stream_id;
+        body["task_kind"] = "stream";
+        body["model_type"] = status.model_type.empty() ? "stream" : status.model_type;
+        body["status"] = status.status;
+        body["source_type"] = status.source_type;
+        body["source_uri"] = status.source_uri;
+        body["camera_id"] = status.camera_id;
+        body["stop_requested"] = status.stop_requested;
+        body["create_time_ms"] = status.create_time_ms;
+        body["start_time_ms"] = status.start_time_ms;
+        body["stop_time_ms"] = status.stop_time_ms;
+        body["last_update_ms"] = status.last_update_ms;
+        body["frame_count"] = status.frame_count;
+        body["fps"] = status.fps;
+        body["width"] = status.width;
+        body["height"] = status.height;
+        body["last_num_detections"] = status.last_num_detections;
+        body["reconnect_count"] = status.reconnect_count;
+        body["no_frame_count"] = status.no_frame_count;
+        body["snapshot_path"] = status.snapshot_path;
+        body["latest_snapshot_path"] = status.latest_snapshot_path;
+        body["snapshot_url"] = "/api/v1/stream/" + stream_id + "/snapshot";
+        body["stop_url"] = "/api/v1/stream/" + stream_id + "/stop";
+        body["worker_id"] = status.worker_id;
+        body["consumer_name"] = status.consumer_name;
+        if (!status.error.empty()) {
+            body["error"] = status.error;
+        }
+        if (!status.last_error.empty()) {
+            body["last_error"] = status.last_error;
+        }
+        return makeJsonResponse(200, body);
+    }
+
+    crow::response HttpController::handleStreamSnapshot(const std::string& stream_id) const {
+        if (!redis_mode_) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_DISABLED";
+            body["error"] = "stream snapshot requires redis.enabled=true";
+            return makeJsonResponse(503, body);
+        }
+
+        StreamTaskStatus status;
+        std::string redis_error;
+        if (!redis_queue_.getStreamTaskStatus(stream_id, status, redis_error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_QUERY_STREAM_FAILED";
+            body["error"] = redis_error;
+            body["stream_id"] = stream_id;
+            return makeJsonResponse(500, body);
+        }
+        if (!status.found) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "STREAM_NOT_FOUND";
+            body["error"] = "stream task not found or expired";
+            body["stream_id"] = stream_id;
+            return makeJsonResponse(404, body);
+        }
+        const std::string snapshot_path = !status.latest_snapshot_path.empty() ? status.latest_snapshot_path : status.snapshot_path;
+        std::string bytes;
+        if (snapshot_path.empty() || !readWholeFileBinaryToString(snapshot_path, bytes) || bytes.empty()) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "STREAM_SNAPSHOT_NOT_READY";
+            body["error"] = "latest stream snapshot is not ready or local file is missing";
+            body["stream_id"] = stream_id;
+            body["status"] = status.status;
+            body["snapshot_path"] = snapshot_path;
+            return makeJsonResponse(404, body);
+        }
+
+        crow::response response;
+        response.code = 200;
+        response.body = std::move(bytes);
+        response.set_header("Content-Type", "image/jpeg");
+        response.set_header("Cache-Control", "no-store");
+        return response;
+    }
+
     crow::response HttpController::handleGetAsyncResult(const std::string& task_id) const {
         if (!redis_mode_) {
             nlohmann::json body;
@@ -1717,6 +2110,10 @@ namespace yolo11_server {
             << "_" << std::setw(3) << std::setfill('0') << ms
             << "_" << ++task_counter_;
         return oss.str();
+    }
+
+    std::string HttpController::makeStreamId() {
+        return "stream_detect_" + makeTaskId();
     }
 
     std::string HttpController::makeResultImageFilename(unsigned long long request_id) const {
