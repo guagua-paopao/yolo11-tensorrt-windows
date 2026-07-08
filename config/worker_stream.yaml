@@ -59,6 +59,12 @@ worker:
   min_alive_workers: 1
   consumer_name_prefix: "stream_worker_"
   log_task_done: true
+  # Phase 15: descriptive capability/resource declaration.
+  worker_group: "stream_detect_gpu0"
+  worker_kind: "stream"
+  task_kind: "live_stream"
+  stream_type: "long_running_stream"
+  max_concurrency: 1
   heartbeat_enabled: true
   heartbeat_interval_ms: 3000
   heartbeat_ttl_seconds: 15
