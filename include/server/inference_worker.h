@@ -10,8 +10,7 @@
 #include "server/app_config.h"
 #include "server/redis_task_queue.h"
 #include "server/label_map.h"
-#include "yolo11_detector_api.h"
-#include "yolo11_obb_api.h"
+#include "server/model_runner.h"
 
 namespace yolo11_server {
 
@@ -35,9 +34,7 @@ namespace yolo11_server {
         void loop();
         void processRedisTask(const RedisTask& task);
         void releaseDetectorNoexcept() noexcept;
-        bool initDetectorByModelType();
-        std::vector<Detection> inferByModelType(const cv::Mat& image);
-        cv::Mat drawByModelType(const cv::Mat& image, const std::vector<Detection>& detections);
+        bool initModelRunner();
         bool isObbModel() const;
 
         void heartbeatLoop() noexcept;
@@ -53,14 +50,13 @@ namespace yolo11_server {
         int worker_id_ = 0;
         AppConfig config_;
         RedisTaskQueue redis_queue_;
-        std::unique_ptr<yolo11::Yolo11Detector> detector_;
-        std::unique_ptr<yolo11::Yolo11ObbDetector> obb_detector_;
+        std::unique_ptr<IModelRunner> runner_;
         LabelMap label_map_;
 
         std::thread thread_;
         std::thread heartbeat_thread_;
         std::atomic<bool> running_{ false };
-        bool detector_initialized_ = false;
+        bool runner_initialized_ = false;
 
         mutable std::mutex state_mutex_;
         std::string worker_status_ = "starting";

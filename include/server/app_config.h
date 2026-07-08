@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <string>
 
 namespace yolo11_server {
@@ -102,6 +103,23 @@ namespace yolo11_server {
         int heartbeat_ttl_seconds = 15;
     };
 
+    // Phase 10.5: optional model profile entry used by config/server_multimodel.yaml.
+    // The current process still activates one model profile at a time; this keeps the
+    // Server/Worker split simple while making detect/obb configuration explicit.
+    struct ModelProfile {
+        std::string name;
+        std::string type;
+        std::string engine_path;
+        std::string labels_path;
+        int gpu_id = 0;
+        bool use_gpu_postprocess = false;
+        std::string stream_key;
+        std::string consumer_group;
+        std::string consumer_name_prefix;
+        int worker_num = 1;
+        int min_alive_workers = 1;
+    };
+
     struct AppConfig {
         ServerSection server;
         ModelSection model;
@@ -109,6 +127,11 @@ namespace yolo11_server {
         RedisSection redis;
         LoggingSection logging;
         WorkerSection worker;
+
+        // Optional multi-model profile registry.
+        // active_model is empty for legacy single-model YAML.
+        std::string active_model;
+        std::map<std::string, ModelProfile> model_profiles;
 
         static AppConfig loadFromYaml(const std::string& yaml_path);
     };

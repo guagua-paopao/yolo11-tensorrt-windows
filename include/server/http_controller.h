@@ -28,9 +28,9 @@ namespace yolo11_server {
 
     private:
         crow::response handleHealth() const;
-        crow::response handleReady() const;
-        crow::response handleWorkers() const;
-        crow::response handleMetrics() const;
+        crow::response handleReady(const crow::request& request) const;
+        crow::response handleWorkers(const crow::request& request) const;
+        crow::response handleMetrics(const crow::request& request) const;
         crow::response handleDetectImage(const crow::request& request);
         crow::response handleDetectImageAsync(const crow::request& request);
         crow::response handleDetectObbImageAsync(const crow::request& request);

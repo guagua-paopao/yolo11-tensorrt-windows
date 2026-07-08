@@ -82,10 +82,24 @@ namespace yolo11_server {
             return lower == "1" || lower == "true" || lower == "yes" || lower == "on";
         }
 
+        std::string getOptionalModelFilter(const crow::request& request) {
+            const char* raw = request.url_params.get("model");
+            if (raw == nullptr) {
+                return {};
+            }
+            return toLowerString(std::string(raw));
+        }
+
+        bool workerMatchesModelFilter(const WorkerHeartbeatRecord& worker, const std::string& model_filter) {
+            if (model_filter.empty()) {
+                return true;
+            }
+            return toLowerString(worker.model_type) == model_filter;
+        }
+
         std::string phaseNameForModelType(const std::string& model_type) {
-            return toLowerString(model_type) == "obb"
-                ? "phase10_0_obb_async_minimal"
-                : "phase8_5_logging_labels_metrics";
+            (void)model_type;
+            return "phase10_5_multimodel_runner_refactor";
         }
 
         crow::response makeJsonResponse(int code, const nlohmann::json& body) {
@@ -141,20 +155,20 @@ namespace yolo11_server {
 
         CROW_ROUTE(app, "/api/v1/ready")
             .methods(crow::HTTPMethod::GET)
-            ([this]() {
-            return handleReady();
+            ([this](const crow::request& request) {
+            return handleReady(request);
                 });
 
         CROW_ROUTE(app, "/api/v1/workers")
             .methods(crow::HTTPMethod::GET)
-            ([this]() {
-            return handleWorkers();
+            ([this](const crow::request& request) {
+            return handleWorkers(request);
                 });
 
         CROW_ROUTE(app, "/api/v1/metrics")
             .methods(crow::HTTPMethod::GET)
-            ([this]() {
-            return handleMetrics();
+            ([this](const crow::request& request) {
+            return handleMetrics(request);
                 });
 
         CROW_ROUTE(app, "/api/v1/detect/image")
@@ -202,6 +216,8 @@ namespace yolo11_server {
         body["phase"] = phaseNameForModelType(config_.model.type);
         body["role"] = "http_producer";
         body["model_type"] = config_.model.type;
+        body["active_model"] = config_.active_model.empty() ? nlohmann::json(nullptr) : nlohmann::json(config_.active_model);
+        body["model_profile_count"] = config_.model_profiles.size();
         body["engine_path"] = config_.model.engine_path;
         body["labels_path"] = config_.model.labels_path;
         body["labels_loaded"] = !label_map_.empty();
@@ -255,17 +271,29 @@ namespace yolo11_server {
         return makeJsonResponse(200, body);
     }
 
-    crow::response HttpController::handleReady() const {
+    crow::response HttpController::handleReady(const crow::request& request) const {
+        const std::string model_filter = getOptionalModelFilter(request);
+        const std::string configured_model_type = toLowerString(config_.model.type);
+
         nlohmann::json body;
         body["success"] = true;
         body["service"] = "yolo11_server";
         body["phase"] = phaseNameForModelType(config_.model.type);
+        body["configured_model_type"] = configured_model_type;
+        body["model_filter"] = model_filter.empty() ? nlohmann::json(nullptr) : nlohmann::json(model_filter);
         body["server_status"] = "ok";
         body["redis_status"] = redis_mode_ ? "unknown" : "disabled";
         body["worker_status"] = "unknown";
         body["ready"] = false;
         body["expected_workers"] = config_.worker.worker_num;
         body["min_alive_workers"] = config_.worker.min_alive_workers;
+
+        if (!model_filter.empty() && model_filter != configured_model_type) {
+            body["success"] = false;
+            body["error_code"] = "MODEL_PROFILE_NOT_ACTIVE";
+            body["reason"] = "requested model is not the active model profile of this server process";
+            return makeJsonResponse(503, body);
+        }
 
         bool redis_ok = false;
         bool memory_ok = true;
@@ -291,6 +319,8 @@ namespace yolo11_server {
             body["redis_pending"] = stats.pending;
             body["redis_stream_len"] = stats.stream_len;
             body["redis_stream_max_len"] = config_.redis.stream_max_len;
+            body["redis_stream_key"] = config_.redis.stream_key;
+            body["redis_consumer_group"] = config_.redis.consumer_group;
         }
         else if (!stats_error.empty()) {
             body["redis_stats_error"] = stats_error;
@@ -320,6 +350,7 @@ namespace yolo11_server {
         std::vector<WorkerHeartbeatRecord> workers;
         std::string workers_error;
         int alive_workers = 0;
+        int matched_workers = 0;
         if (redis_queue_.getWorkerHeartbeats(
             config_.worker.consumer_name_prefix,
             config_.worker.worker_num,
@@ -327,12 +358,17 @@ namespace yolo11_server {
             workers_error)) {
             nlohmann::json arr = nlohmann::json::array();
             for (const auto& worker : workers) {
+                if (!workerMatchesModelFilter(worker, model_filter)) {
+                    continue;
+                }
+                ++matched_workers;
                 if (worker.alive) {
                     ++alive_workers;
                 }
                 arr.push_back(workerHeartbeatToJson(worker));
             }
             body["workers"] = arr;
+            body["matched_workers"] = matched_workers;
             body["alive_workers"] = alive_workers;
             workers_ok = alive_workers >= config_.worker.min_alive_workers;
             body["worker_status"] = workers_ok ? "ok" : "no_enough_alive_workers";
@@ -359,13 +395,29 @@ namespace yolo11_server {
         return makeJsonResponse(ready ? 200 : 503, body);
     }
 
-    crow::response HttpController::handleWorkers() const {
+    crow::response HttpController::handleWorkers(const crow::request& request) const {
+        const std::string model_filter = getOptionalModelFilter(request);
+        const std::string configured_model_type = toLowerString(config_.model.type);
+
         if (!redis_mode_) {
             nlohmann::json body;
             body["success"] = false;
             body["error_code"] = "REDIS_DISABLED";
             body["error"] = "worker heartbeat query requires redis.enabled=true";
             return makeJsonResponse(503, body);
+        }
+
+        if (!model_filter.empty() && model_filter != configured_model_type) {
+            nlohmann::json body;
+            body["success"] = true;
+            body["configured_model_type"] = configured_model_type;
+            body["model_filter"] = model_filter;
+            body["expected_workers"] = 0;
+            body["min_alive_workers"] = 0;
+            body["alive_workers"] = 0;
+            body["workers"] = nlohmann::json::array();
+            body["note"] = "requested model is not the active model profile of this server process";
+            return makeJsonResponse(200, body);
         }
 
         std::vector<WorkerHeartbeatRecord> workers;
@@ -383,8 +435,13 @@ namespace yolo11_server {
         }
 
         int alive_workers = 0;
+        int matched_workers = 0;
         nlohmann::json arr = nlohmann::json::array();
         for (const auto& worker : workers) {
+            if (!workerMatchesModelFilter(worker, model_filter)) {
+                continue;
+            }
+            ++matched_workers;
             if (worker.alive) {
                 ++alive_workers;
             }
@@ -393,7 +450,10 @@ namespace yolo11_server {
 
         nlohmann::json body;
         body["success"] = true;
+        body["configured_model_type"] = configured_model_type;
+        body["model_filter"] = model_filter.empty() ? nlohmann::json(nullptr) : nlohmann::json(model_filter);
         body["expected_workers"] = config_.worker.worker_num;
+        body["matched_workers"] = matched_workers;
         body["min_alive_workers"] = config_.worker.min_alive_workers;
         body["alive_workers"] = alive_workers;
         body["heartbeat_enabled"] = config_.worker.heartbeat_enabled;
@@ -403,13 +463,30 @@ namespace yolo11_server {
         return makeJsonResponse(200, body);
     }
 
-    crow::response HttpController::handleMetrics() const {
+    crow::response HttpController::handleMetrics(const crow::request& request) const {
+        const std::string model_filter = getOptionalModelFilter(request);
+        const std::string configured_model_type = toLowerString(config_.model.type);
+
         if (!redis_mode_) {
             nlohmann::json body;
             body["success"] = false;
             body["error_code"] = "REDIS_DISABLED";
             body["error"] = "metrics require redis.enabled=true";
             return makeJsonResponse(503, body);
+        }
+
+        if (!model_filter.empty() && model_filter != configured_model_type) {
+            nlohmann::json body;
+            body["success"] = true;
+            body["configured_model_type"] = configured_model_type;
+            body["model_filter"] = model_filter;
+            body["metrics_found"] = false;
+            body["total_tasks_done"] = 0;
+            body["total_tasks_failed"] = 0;
+            body["total_tasks"] = 0;
+            body["workers"] = nlohmann::json::array();
+            body["note"] = "requested model is not the active model profile of this server process";
+            return makeJsonResponse(200, body);
         }
 
         RedisRuntimeMetrics metrics;
@@ -450,6 +527,9 @@ namespace yolo11_server {
             workers,
             workers_error)) {
             for (const auto& worker : workers) {
+                if (!workerMatchesModelFilter(worker, model_filter)) {
+                    continue;
+                }
                 if (worker.alive) {
                     ++alive_workers;
                 }
@@ -457,10 +537,27 @@ namespace yolo11_server {
             }
         }
 
+        nlohmann::json model_summary;
+        model_summary["model_type"] = configured_model_type;
+        model_summary["stream_key"] = config_.redis.stream_key;
+        model_summary["consumer_group"] = config_.redis.consumer_group;
+        model_summary["total_done"] = metrics.done_count;
+        model_summary["total_failed"] = metrics.failed_count;
+        model_summary["total_tasks"] = metrics.total_count;
+        model_summary["avg_queue_wait_ms"] = metrics.avg_queue_wait_ms;
+        model_summary["avg_inference_ms"] = metrics.avg_inference_ms;
+        model_summary["avg_total_ms"] = metrics.avg_total_ms;
+        model_summary["recent_done_count"] = metrics.recent_done_count;
+        model_summary["recent_qps_60s"] = metrics.qps_recent;
+
         nlohmann::json body;
         body["success"] = true;
         body["service"] = "yolo11_server";
-        body["phase"] = phaseNameForModelType(config_.model.type);
+        body["phase"] = "phase10_5_multimodel_runner_refactor";
+        body["configured_model_type"] = configured_model_type;
+        body["model_filter"] = model_filter.empty() ? nlohmann::json(nullptr) : nlohmann::json(model_filter);
+        body["models"] = nlohmann::json::object();
+        body["models"][configured_model_type] = model_summary;
         body["metrics_enabled"] = config_.redis.metrics_enabled;
         body["metrics_found"] = metrics.found;
         body["recent_window_seconds"] = metrics.recent_window_seconds;
@@ -486,6 +583,8 @@ namespace yolo11_server {
             body["redis_pending"] = stream_stats.pending;
             body["redis_stream_len"] = stream_stats.stream_len;
             body["redis_stream_max_len"] = config_.redis.stream_max_len;
+            body["redis_stream_key"] = config_.redis.stream_key;
+            body["redis_consumer_group"] = config_.redis.consumer_group;
         }
         else if (!stream_error.empty()) {
             body["redis_stream_error"] = stream_error;
