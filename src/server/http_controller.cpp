@@ -99,7 +99,7 @@ namespace yolo11_server {
 
         std::string phaseNameForModelType(const std::string& model_type) {
             (void)model_type;
-            return "phase10_5_multimodel_runner_refactor";
+            return "phase12_0_detect_obb_dual_parallel";
         }
 
         crow::response makeJsonResponse(int code, const nlohmann::json& body) {
@@ -553,7 +553,7 @@ namespace yolo11_server {
         nlohmann::json body;
         body["success"] = true;
         body["service"] = "yolo11_server";
-        body["phase"] = "phase10_5_multimodel_runner_refactor";
+        body["phase"] = "phase12_0_detect_obb_dual_parallel";
         body["configured_model_type"] = configured_model_type;
         body["model_filter"] = model_filter.empty() ? nlohmann::json(nullptr) : nlohmann::json(model_filter);
         body["models"] = nlohmann::json::object();
@@ -855,7 +855,7 @@ namespace yolo11_server {
             return makeJsonResponse(400, body);
         }
 
-        const std::string task_id = makeTaskId();
+        const std::string task_id = target_model_type + "_" + makeTaskId();
         const std::string input_key = redis_queue_.inputImageKey(task_id);
         const std::string result_key = redis_queue_.resultImageKey(task_id);
         const std::string input_path = makeInputImagePath(task_id);
