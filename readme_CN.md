@@ -1,6 +1,6 @@
 # YOLO11 TensorRT Windows
 
-本项目用于在 Windows 平台部署 YOLO11 TensorRT 推理，支持 Visual Studio 2019、CUDA、TensorRT 10、OpenCV、可复用 C++ Runtime API、纯 C++ HTTP 图片检测服务，以及当前已经跑通的 Phase 8 / Phase 8.5 健康检查增强、Worker 心跳、Redis 图片 TTL 与内存控制、Worker 离线拒绝入队、spdlog 日志系统、labels_path 标签外置和 metrics 指标接口。前序 Phase 7 已完成 Server / Worker 独立进程拆分、Redis Binary 图片存储、Worker 崩溃恢复与 Debug 弹窗修复；Phase 6 已完成 Redis 连接复用、压测统计、Pending 恢复与 Stream 长度控制。
+本项目用于在 Windows 平台部署 YOLO11 TensorRT 推理，支持 Visual Studio 2019、CUDA、TensorRT 10、OpenCV、可复用 C++ Runtime API、纯 C++ HTTP 图片检测服务、Redis Stream 异步任务队列、Server / Worker 独立进程部署，以及当前已经跑通的 Phase 12 Detect + OBB 双服务并行部署。项目目前已经支持 Detection 与 OBB 两类模型的异步图片服务化，具备 Worker 心跳、ready 检查、Redis Binary 图片存储、TTL 清理、Pending 恢复、日志、labels_path、metrics、多模型 Runner 抽象和双服务并行压测验证。
 
 这个 README 中文版主要用于记录项目演进过程、踩坑原因、修改逻辑和阶段性反思。
 
@@ -9,7 +9,7 @@
 当前项目已经完成：
 
 ```text
-Phase 8.5：健康检查增强 + Worker 心跳 + Redis 图片 TTL / 内存控制 + spdlog 日志 + labels_path + metrics 指标接口
+Phase 12.0：Detect + OBB 双服务并行部署
 ```
 
 已经验证通过的能力：
@@ -61,17 +61,34 @@ Phase 8.5：健康检查增强 + Worker 心跳 + Redis 图片 TTL / 内存控制
 - Phase 8.5 新增 `labels_path`：`class_name` 从 `labels/coco.txt` 加载，不再依赖硬编码数组
 - Phase 8.5 新增 `/api/v1/metrics`：统计累计任务、失败数、近期 QPS、平均耗时和 Worker 分布
 - Phase 8.5 标准压测：`1000 tasks / concurrency=10`，`1000/0/0`，QPS=59.177
+- Phase 10.0 OBB 图片异步服务最小闭环：新增 `POST /api/v1/detect/obb/async`
+- Phase 10.0 OBB 独立队列：`yolo:stream:obb` + `yolo11_obb_group`
+- Phase 10.0 OBB Worker：`yolo11_worker.exe` 可通过 `model.type=obb` 加载 `Yolo11ObbDetector`
+- Phase 10.0 OBB 结果 JSON：返回 `obb_coordinate_system`、`obb_format`、`points`、`angle`、`bbox_axis_aligned` 等字段
+- Phase 10.0 OBB 结果图：`GET /api/v1/result/{task_id}/image` 可返回旋转框结果图
+- Phase 10.5 多模型配置整理：新增 `server_multimodel.yaml`、`worker_detect.yaml`、`worker_obb.yaml`
+- Phase 10.5 新增 `IModelRunner` 抽象，Worker 不再直接依赖具体 Detector 分支
+- Phase 10.5 新增 `DetectModelRunner` / `ObbModelRunner`，为后续更多模型类型扩展做铺垫
+- Phase 10.5 `/ready`、`/workers`、`/metrics` 支持 `?model=detect` / `?model=obb` 过滤
+- Phase 11.0 OBB 稳定性测试：100 tasks `100/0/0`，QPS≈33.047
+- Phase 11.0 OBB 稳定性测试：500 tasks `500/0/0`，QPS≈34.336
+- Phase 11.0 非法输入测试：HTTP 400 明确拒绝，`PASS_HTTP_REJECTED`
+- Phase 11.0 Worker 恢复测试：中断 Worker 后重启，100 个任务最终全部 done
+- Phase 12.0 Detect + OBB 双服务并行：Detect Server 运行于 8080，OBB Server 运行于 8081
+- Phase 12.0 Detect + OBB 独立 Worker：`worker_1` 与 `obb_worker_1` 同时在线
+- Phase 12.0 双服务 smoke test：Detect 与 OBB 均可提交、查询和下载结果图
+- Phase 12.0 双服务 benchmark：Detect 50/50 done，OBB 50/50 done，failed=0，timeout=0，QPS≈31.866
 
 当前还没有做：
 
-- ImageStorage 抽象层（当前 Redis Binary 仍然是主要实现，后续需要拆出 `RedisImageStorage` / `LocalFileImageStorage`）
-- OBB HTTP 服务化接口
 - 视频文件异步检测接口
+- 视频任务进度、取消、结果视频下载
 - RTSP / 摄像头流服务化接口
-- 多 GPU 调度
-- 启停脚本、服务守护、Docker / Linux 部署路径
+- 多 GPU / 多模型 Worker 调度
+- ImageStorage 抽象层（当前 Redis Binary 仍然是主要实现，后续可拆出 `RedisImageStorage` / `LocalFileImageStorage` / 对象存储）
+- 启停脚本、服务守护、Prometheus 指标、Docker / Linux 部署路径
 
-当前开发原则是：**先把 detect 图片异步服务、Redis Stream、多 Worker、Redis 连接复用、Server/Worker 进程拆分、Redis Binary 图片存储、健康检查、可观测性和异常恢复链路做扎实，再进入 ImageStorage 抽象、OBB/Seg/Pose/Video 扩展。**
+当前开发原则是：**先保持 detect + OBB 双模型图片异步服务稳定，再进入视频文件异步检测；视频、RTSP、多 GPU、对象存储和生产运维能力继续后置，避免在基础链路还没沉淀清楚时过度扩张。**
 
 ---
 
@@ -262,7 +279,7 @@ yolo11-tensorrt-windows
 | 任务 | 原始命令行程序 | C++ API 封装 | Demo 程序 | HTTP 服务 | 状态 |
 |---|---|---|---|---|---|
 | Detection | `yolo11_det.exe` | `Yolo11Detector` | `demo_image.exe`, `demo_video.exe` | 同步 + Redis 异步 + 多 Worker | 已支持 |
-| OBB | `yolo11_obb.exe` | `Yolo11ObbDetector` | `demo_obb_image.exe` | 后续计划 | API 和 CPU demo 已验证 |
+| OBB | `yolo11_obb.exe` | `Yolo11ObbDetector` | `demo_obb_image.exe` | 异步 HTTP 服务 + 独立 Worker + 双服务并行 | Phase 10-12 已验证 |
 | Classification | 源码已有 | 计划封装 | 计划添加 | 后续计划 | 暂未封装 |
 | Segmentation | 源码已有 | 计划封装 | 计划添加 | 后续计划 | 暂未封装 |
 | Pose | 源码已有 | 计划封装 | 计划添加 | 后续计划 | 暂未封装 |
@@ -2528,6 +2545,373 @@ Phase 9：ImageStorage 抽象与存储层解耦
 
 也就是把当前写在业务逻辑中的 Redis Binary 图片读写抽象为统一接口，为后续 LocalFileStorage、RedisImageStorage、MinIO / S3 或共享磁盘存储打基础。
 
+
+---
+
+## Phase 10 / 10.5 / 11 / 12：OBB 服务化、多模型 Runner、稳定性验证与双服务并行
+
+### 阶段总定位
+
+从 Phase 8.5 之后，项目跳过原先计划中的独立 Phase 9，直接进入 OBB 图片异步服务化。这里的核心不是“把 OBB demo 接到 HTTP 上这么简单”，而是让 OBB 复用前面已经验证过的 Server / Worker、Redis Stream、Redis Binary Image、heartbeat、ready、TTL、logging、labels_path、ResultSerializer 和 metrics 机制。
+
+这几个阶段可以概括为：
+
+```text
+Phase 10.0：OBB 图片异步服务最小闭环
+Phase 10.5：多模型配置与 Runner 抽象整理
+Phase 11.0：OBB 稳定性、异常输入与 Worker 恢复验证
+Phase 12.0：Detect + OBB 双服务并行部署
+```
+
+### Phase 10.0：OBB 图片异步服务最小闭环
+
+Phase 10.0 的目标是让 OBB 图片检测像 Detection 图片检测一样，通过 HTTP 异步提交任务，由独立 Worker 消费 Redis Stream，执行 TensorRT OBB 推理，并返回结构化 JSON 与结果图。
+
+新增核心接口：
+
+```text
+POST /api/v1/detect/obb/async
+GET  /api/v1/result/{task_id}
+GET  /api/v1/result/{task_id}/image
+```
+
+推荐配置：
+
+```yaml
+model:
+  type: "obb"
+  engine_path: "D:/tensorrtx/yolo11/engines/yolo11n-obb.engine"
+  labels_path: "D:/tensorrtx/yolo11/labels/dota.txt"
+  gpu_id: 0
+  use_gpu_postprocess: false
+
+redis:
+  stream_key: "yolo:stream:obb"
+  consumer_group: "yolo11_obb_group"
+
+worker:
+  consumer_name_prefix: "obb_worker_"
+```
+
+启动方式：
+
+```powershell
+# OBB Server
+.\out\build\x64-Debug\yolo11_server.exe .\config\server_obb.yaml
+
+# OBB Worker
+.\out\build\x64-Debug\yolo11_worker.exe .\config\worker_obb.yaml --consumer-name obb_worker_1
+```
+
+提交 OBB 异步任务：
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/obb/async" `
+  -H "Content-Type: image/jpeg" `
+  --data-binary "@D:/tensorrtx/yolo11/images/a.jpg"
+```
+
+结果 JSON 中新增 OBB 语义字段：
+
+```json
+{
+  "model_type": "obb",
+  "obb_coordinate_system": "original_image_pixels",
+  "obb_format": "cxcywh_angle_points",
+  "detections": [
+    {
+      "class_id": 0,
+      "class_name": "plane",
+      "confidence": 0.91,
+      "obb": {
+        "cx": 512.4,
+        "cy": 336.7,
+        "w": 128.2,
+        "h": 42.5,
+        "angle": -18.3,
+        "points": [[460,330],[582,292],[594,342],[472,380]]
+      },
+      "bbox_axis_aligned": { "x1": 460, "y1": 292, "x2": 594, "y2": 380 }
+    }
+  ]
+}
+```
+
+阶段反思：OBB 第一版不应该追求极限性能，而应该优先确认类别数、labels、engine、后处理、旋转框坐标、结果图和 Redis 状态流转是否正确。
+
+### Phase 10.5：多模型配置与 Runner 抽象整理
+
+Phase 10.0 跑通后，如果继续在 `InferenceWorker` 里堆：
+
+```cpp
+if (model_type == "detect") { ... }
+else if (model_type == "obb") { ... }
+```
+
+后面再接 Seg、Pose、Video 时，Worker 会越来越乱。因此 Phase 10.5 引入多模型 Runner 抽象。
+
+新增核心设计：
+
+```cpp
+class IModelRunner {
+public:
+    virtual ~IModelRunner() = default;
+    virtual bool load(const ModelConfig& config) = 0;
+    virtual InferenceResult infer(const cv::Mat& image) = 0;
+    virtual cv::Mat drawResult(const cv::Mat& image, const InferenceResult& result) = 0;
+    virtual std::string modelType() const = 0;
+};
+```
+
+具体实现：
+
+```text
+DetectModelRunner -> 内部使用 Yolo11Detector
+ObbModelRunner    -> 内部使用 Yolo11ObbDetector
+```
+
+这样 Worker 的职责变成：
+
+```text
+读取 Redis 任务
+-> 读取 input image
+-> runner_->infer(image)
+-> runner_->drawResult(image, result)
+-> ResultSerializer 输出 JSON
+-> 写回 Redis
+-> XACK
+```
+
+而不再直接关心具体模型后处理细节。
+
+新增配置文件：
+
+```text
+config/server_multimodel.yaml
+config/worker_detect.yaml
+config/worker_obb.yaml
+```
+
+接口增强：
+
+```text
+GET /api/v1/ready?model=detect
+GET /api/v1/ready?model=obb
+GET /api/v1/workers?model=detect
+GET /api/v1/workers?model=obb
+GET /api/v1/metrics?model=detect
+GET /api/v1/metrics?model=obb
+```
+
+阶段反思：抽象不是为了“看起来高级”，而是为了让后续扩展不会继续复制粘贴。Phase 10.5 的价值在于把模型差异收敛到 Runner 和 Serializer，不让 Worker 主循环膨胀。
+
+### Phase 11.0：OBB 稳定性、异常输入与 Worker 恢复验证
+
+Phase 11.0 不继续增加功能，而是验证 OBB 单服务是否稳定。新增测试脚本：
+
+```text
+tools/phase11_obb_stability_suite.py
+tools/phase11_invalid_input_test.py
+tools/phase11_worker_recovery_test.py
+```
+
+100 任务稳定性测试：
+
+```powershell
+python tools\phase11_obb_stability_suite.py `
+  --url http://127.0.0.1:8080 `
+  --endpoint /api/v1/detect/obb/async `
+  --image D:/tensorrtx/yolo11/images/a.jpg `
+  --tasks 100 `
+  --concurrency 5 `
+  --timeout 180 `
+  --download-results 3
+```
+
+500 任务稳定性测试：
+
+```powershell
+python tools\phase11_obb_stability_suite.py `
+  --url http://127.0.0.1:8080 `
+  --endpoint /api/v1/detect/obb/async `
+  --image D:/tensorrtx/yolo11/images/a.jpg `
+  --tasks 500 `
+  --concurrency 5 `
+  --timeout 600 `
+  --download-results 5
+```
+
+实测结果：
+
+| 测试项 | 结果 |
+|---|---|
+| OBB 单任务 | `done`，result JSON 与结果图正常返回 |
+| 100 tasks / concurrency=5 | `100/0/0`，QPS≈33.047 |
+| 500 tasks / concurrency=5 | `500/0/0`，QPS≈34.336 |
+| 非法输入 | HTTP 400，`IMAGE_DECODE_FAILED`，`PASS_HTTP_REJECTED` |
+| Worker 恢复测试 | 中断 Worker 后重启，100 个任务最终全部 done |
+| 最终 Redis | `XPENDING=0`，`XLEN=743` |
+
+非法输入测试：
+
+```powershell
+python tools\phase11_invalid_input_test.py `
+  --url http://127.0.0.1:8080 `
+  --endpoint /api/v1/detect/obb/async
+```
+
+返回：
+
+```json
+{
+  "submit_http_status": 400,
+  "submit_response": {
+    "error_code": "IMAGE_DECODE_FAILED",
+    "success": false
+  },
+  "verdict": "PASS_HTTP_REJECTED"
+}
+```
+
+Worker 恢复测试：
+
+```powershell
+python tools\phase11_worker_recovery_test.py `
+  --url http://127.0.0.1:8080 `
+  --endpoint /api/v1/detect/obb/async `
+  --image D:/tensorrtx/yolo11/images/a.jpg `
+  --tasks 100 `
+  --concurrency 10 `
+  --kill-window 10 `
+  --timeout 240
+```
+
+测试过程中关闭 OBB Worker，再重启 Worker。最终：
+
+```text
+[PASS] Worker recovery test passed.
+```
+
+阶段反思：稳定性测试不能只看 20 个任务能不能 done，还要看非法输入、Worker 中断、Pending 恢复、ready 恢复和 Redis 是否有残留。Phase 11 证明 OBB 服务不仅“能跑”，而且具备基本恢复能力。
+
+### Phase 12.0：Detect + OBB 双服务并行部署
+
+Phase 12 的目标是让 Detect 与 OBB 同时运行，并且互不干扰。最终采用最稳的双 Server + 双 Worker 方案。
+
+部署结构：
+
+| 服务 | 端口 | Stream | Consumer Group | Worker |
+|---|---:|---|---|---|
+| Detect | 8080 | `yolo:stream:detect` | `yolo11_group` | `worker_1` |
+| OBB | 8081 | `yolo:stream:obb` | `yolo11_obb_group` | `obb_worker_1` |
+
+启动四个窗口：
+
+```powershell
+# Detect Server
+.\out\build\x64-Debug\yolo11_server.exe .\config\server_detect_phase12.yaml
+
+# OBB Server
+.\out\build\x64-Debug\yolo11_server.exe .\config\server_obb_phase12.yaml
+
+# Detect Worker
+.\out\build\x64-Debug\yolo11_worker.exe .\config\worker_detect_phase12.yaml --consumer-name worker_1
+
+# OBB Worker
+.\out\build\x64-Debug\yolo11_worker.exe .\config\worker_obb_phase12.yaml --consumer-name obb_worker_1
+```
+
+健康检查：
+
+```powershell
+# Detect
+curl.exe "http://127.0.0.1:8080/api/v1/health"
+curl.exe "http://127.0.0.1:8080/api/v1/ready?model=detect"
+curl.exe "http://127.0.0.1:8080/api/v1/workers?model=detect"
+curl.exe "http://127.0.0.1:8080/api/v1/metrics?model=detect"
+
+# OBB
+curl.exe "http://127.0.0.1:8081/api/v1/health"
+curl.exe "http://127.0.0.1:8081/api/v1/ready?model=obb"
+curl.exe "http://127.0.0.1:8081/api/v1/workers?model=obb"
+curl.exe "http://127.0.0.1:8081/api/v1/metrics?model=obb"
+```
+
+双服务 smoke test：
+
+```powershell
+python tools\phase12_dual_service_test.py `
+  --detect-url http://127.0.0.1:8080 `
+  --obb-url http://127.0.0.1:8081 `
+  --detect-image D:/tensorrtx/yolo11/images/bus.png `
+  --obb-image D:/tensorrtx/yolo11/images/a.jpg `
+  --timeout 120
+```
+
+实测结果：
+
+```text
+[PASS] Phase 12 dual-service smoke test passed.
+Detect: status=done, model_type=detect, num_detections=3
+OBB:    status=done, model_type=obb,    num_detections=0
+```
+
+双服务 benchmark：
+
+```powershell
+python tools\phase12_dual_benchmark.py `
+  --detect-url http://127.0.0.1:8080 `
+  --obb-url http://127.0.0.1:8081 `
+  --detect-image D:/tensorrtx/yolo11/images/bus.png `
+  --obb-image D:/tensorrtx/yolo11/images/a.jpg `
+  --detect-tasks 50 `
+  --obb-tasks 50 `
+  --concurrency 10 `
+  --timeout 240
+```
+
+实测结果：
+
+```text
+Detect: 50 done / 0 failed / 0 timeout
+OBB:    50 done / 0 failed / 0 timeout
+Total:  100 done, QPS≈31.866
+```
+
+Redis 验收：
+
+```bash
+redis-cli -h 172.19.196.109 -p 6379 XPENDING yolo:stream:detect yolo11_group
+redis-cli -h 172.19.196.109 -p 6379 XPENDING yolo:stream:obb yolo11_obb_group
+redis-cli -h 172.19.196.109 -p 6379 XINFO CONSUMERS yolo:stream:detect yolo11_group
+redis-cli -h 172.19.196.109 -p 6379 XINFO CONSUMERS yolo:stream:obb yolo11_obb_group
+```
+
+最终：
+
+```text
+Detect XPENDING = 0
+OBB XPENDING = 0
+worker_1 pending = 0
+obb_worker_1 pending = 0
+```
+
+阶段反思：双服务并行不是把两个模型塞进同一个队列，而是要让端口、配置、Stream、Consumer Group、Worker、labels、metrics 都清晰隔离。这样后续扩展视频或多 GPU 时，系统边界才不会糊成一团。
+
+### Phase 10 到 12 阶段总反思
+
+1. OBB 服务化的难点不在 HTTP 路由，而在类别数、labels、engine、后处理、结果图和 JSON 字段的一致性。
+2. 多模型扩展不能靠复制粘贴堆 `if/else`，需要尽早抽象 `IModelRunner`。
+3. `/ready?model=...` 和 `/metrics?model=...` 非常重要，因为多模型服务中“某一个模型不可用”不等于整个 Server 死了。
+4. 非法输入测试是必要的。坏图应该在 HTTP 层明确拒绝，而不是交给 Worker 崩溃。
+5. Worker 恢复测试是异步服务的底线。只要任务可能进入 Pending，就必须验证 XAUTOCLAIM 和 XACK 顺序。
+6. Detect 与 OBB 应使用独立 Stream 和 Consumer Group，避免不同模型互相影响。
+7. `num_detections=0` 不等于服务失败，要结合 `status=done`、`model_type`、结果图和测试图片领域判断。
+8. Redis 中旧 consumer 的 `inactive` 很大不是问题，只要 `pending=0` 就不会影响当前服务。
+9. 脚本里 Windows 找不到 `redis-cli` 不影响服务本身，可以在 WSL 中手动查 Redis，或后续让脚本支持 `wsl redis-cli`。
+10. Phase 12 之后，项目已经具备 Detect + OBB 双模型图片服务基础，下一步再进入视频服务才更稳。
+
+
 ## 关键问题记录与反思
 
 ### 1. 第三方库安装成功后，下一步不是继续装库，而是接入 CMake
@@ -3056,23 +3440,27 @@ Phase 6：Redis 连接复用、自动重连与生产化稳定性优化
 Phase 7：Server / Worker 独立进程拆分、Redis Binary 图片存储与 Worker 崩溃恢复
 Phase 8：健康检查增强、Worker 心跳、Redis 图片 TTL / 内存控制、Worker 离线拒绝入队
 Phase 8.5：spdlog 日志系统、labels_path 标签外置、ResultSerializer 收口、metrics 指标接口
+Phase 10.0：OBB 图片异步服务最小闭环
+Phase 10.5：多模型配置与 Runner 抽象整理
+Phase 11.0：OBB 稳定性、异常输入与 Worker 恢复验证
+Phase 12.0：Detect + OBB 双服务并行部署
 ```
 
 下一步建议进入：
 
 ```text
-Phase 9：ImageStorage 抽象与存储层解耦
+Phase 13：视频文件异步检测服务
 ```
 
-Phase 9 推荐目标：
+Phase 13 推荐目标：
 
 ```text
-存储层解耦
-├── 设计 ImageStorage 抽象接口
-├── 实现 RedisImageStorage
-├── 实现 LocalFileImageStorage
-├── 让 HttpController / InferenceWorker 不直接依赖 Redis Binary 细节
-└── 为后续 MinIO / S3 / 共享磁盘 / 多机器部署打基础
+视频文件异步检测
+├── 上传视频文件并生成 video_task_id
+├── Worker 逐帧读取视频并执行 detect / OBB 推理
+├── 记录 progress、total_frames、processed_frames、fps
+├── 支持查询任务进度、失败原因和结果视频路径
+└── 输出带检测结果的视频文件，后续再扩展 cancel / RTSP / 多 GPU
 
 继续保留的稳定性机制
 ├── Redis Stream Consumer Group
@@ -3088,10 +3476,9 @@ Phase 9 推荐目标：
 
 后续扩展方向：
 
-- OBB HTTP 服务化接口
 - 视频文件异步检测
 - RTSP / 摄像头流服务化
-- 多 GPU 调度
+- 多 GPU / 多模型 Worker 调度
 - 批量推理 / micro-batching
 - 对象存储或数据库持久化
 - 结构化日志与服务守护脚本
