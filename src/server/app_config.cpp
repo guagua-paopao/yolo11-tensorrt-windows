@@ -2,6 +2,8 @@
 
 #include <iostream>
 #include <stdexcept>
+#include <algorithm>
+#include <cctype>
 
 #include <yaml-cpp/yaml.h>
 
@@ -15,6 +17,71 @@ namespace yolo11_server {
                 return default_value;
             }
             return node[key].as<T>();
+        }
+
+        std::string toLowerString(std::string value) {
+            std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+            });
+            return value;
+        }
+
+        std::string inferWorkerKind(const AppConfig& config) {
+            if (config.stream.enabled) {
+                return "stream";
+            }
+            if (config.video.enabled) {
+                return "video";
+            }
+            return "image";
+        }
+
+        std::string inferTaskKind(const AppConfig& config) {
+            if (config.stream.enabled) {
+                return "live_stream";
+            }
+            if (config.video.enabled) {
+                return "video_file";
+            }
+            return "image_async";
+        }
+
+        std::string inferStreamType(const AppConfig& config) {
+            return config.stream.enabled ? std::string("long_running_stream") : std::string("redis_stream");
+        }
+
+        std::string inferProfileType(const AppConfig& config) {
+            if (config.stream.enabled) {
+                return "stream";
+            }
+            if (config.video.enabled) {
+                return "video";
+            }
+            return toLowerString(config.model.type.empty() ? std::string("detect") : config.model.type);
+        }
+
+        std::string inferWorkerGroup(const AppConfig& config) {
+            const std::string kind = inferWorkerKind(config);
+            const std::string profile = inferProfileType(config);
+            return kind + "_" + profile + "_gpu" + std::to_string(config.model.gpu_id);
+        }
+
+        void normalizeWorkerCapability(AppConfig& config) {
+            if (config.worker.worker_kind.empty()) {
+                config.worker.worker_kind = inferWorkerKind(config);
+            }
+            if (config.worker.task_kind.empty()) {
+                config.worker.task_kind = inferTaskKind(config);
+            }
+            if (config.worker.stream_type.empty()) {
+                config.worker.stream_type = inferStreamType(config);
+            }
+            if (config.worker.worker_group.empty()) {
+                config.worker.worker_group = inferWorkerGroup(config);
+            }
+            if (config.worker.max_concurrency <= 0) {
+                config.worker.max_concurrency = config.stream.enabled ? 1 : config.worker.worker_num;
+            }
         }
 
     }  // namespace
@@ -284,6 +351,31 @@ namespace yolo11_server {
             "log_task_done",
             config.worker.log_task_done
         );
+        config.worker.worker_group = readOrDefault<std::string>(
+            worker,
+            "worker_group",
+            config.worker.worker_group
+        );
+        config.worker.worker_kind = readOrDefault<std::string>(
+            worker,
+            "worker_kind",
+            config.worker.worker_kind
+        );
+        config.worker.task_kind = readOrDefault<std::string>(
+            worker,
+            "task_kind",
+            config.worker.task_kind
+        );
+        config.worker.stream_type = readOrDefault<std::string>(
+            worker,
+            "stream_type",
+            config.worker.stream_type
+        );
+        config.worker.max_concurrency = readOrDefault<int>(
+            worker,
+            "max_concurrency",
+            config.worker.max_concurrency
+        );
         config.worker.heartbeat_enabled = readOrDefault<bool>(
             worker,
             "heartbeat_enabled",
@@ -321,6 +413,9 @@ namespace yolo11_server {
         }
         if (config.worker.heartbeat_ttl_seconds < 3) {
             config.worker.heartbeat_ttl_seconds = 3;
+        }
+        if (config.worker.max_concurrency <= 0) {
+            config.worker.max_concurrency = 1;
         }
 
 
@@ -407,6 +502,8 @@ namespace yolo11_server {
         if (config.redis.consumer_group.empty()) {
             config.redis.consumer_group = config.model.type == "obb" ? "yolo11_obb_group" : "yolo11_group";
         }
+
+        normalizeWorkerCapability(config);
         return config;
     }
 

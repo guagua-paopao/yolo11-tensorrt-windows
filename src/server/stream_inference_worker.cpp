@@ -458,6 +458,14 @@ namespace yolo11_server {
             heartbeat.worker_id = worker_id_;
             heartbeat.gpu_id = config_.model.gpu_id;
             heartbeat.model_type = "stream";
+            heartbeat.runner_model_type = config_.model.type;
+            heartbeat.worker_group = config_.worker.worker_group;
+            heartbeat.worker_kind = config_.worker.worker_kind;
+            heartbeat.task_kind = config_.worker.task_kind;
+            heartbeat.stream_type = config_.worker.stream_type;
+            heartbeat.engine_path = config_.model.engine_path;
+            heartbeat.labels_path = config_.model.labels_path;
+            heartbeat.max_concurrency = config_.worker.max_concurrency;
             heartbeat.processed_count = processed_count_.load();
             heartbeat.failed_count = failed_count_.load();
             heartbeat.start_time_ms = start_time_ms_;
