@@ -1,5 +1,5 @@
-# Current active OBB HTTP producer/query service.
-# Start: yolo11_server.exe config/server_obb.yaml
+# Phase 12.0 OBB HTTP producer/query service.
+# Run together with server_detect_phase12.yaml on a different port.
 active_model: "obb"
 
 server:
@@ -21,6 +21,7 @@ models:
     consumer_name_prefix: "worker_"
     worker_num: 1
     min_alive_workers: 1
+
   obb:
     type: "obb"
     engine_path: "D:/tensorrtx/yolo11/engines/yolo11n-obb.engine"
@@ -35,9 +36,19 @@ models:
 
 output:
   save_result_image: true
-  input_dir: "./runtime/input/images/obb"
-  output_dir: "./runtime/output/images/obb"
+  input_dir: "./temp/input"
+  output_dir: "./output"
   jpeg_quality: 90
+
+logging:
+  enabled: true
+  log_dir: "./logs"
+  level: "info"
+  console: true
+  file: true
+  flush_interval_sec: 3
+  max_file_size_mb: 50
+  max_files: 5
 
 redis:
   enabled: true
@@ -61,6 +72,11 @@ redis:
   enable_pending_reclaim: true
   pending_min_idle_ms: 10000
 
+metrics:
+  enabled: true
+  recent_window_seconds: 60
+  ttl_seconds: 3600
+
 worker:
   enabled: false
   worker_num: 1
@@ -70,18 +86,3 @@ worker:
   heartbeat_enabled: true
   heartbeat_interval_ms: 3000
   heartbeat_ttl_seconds: 15
-
-metrics:
-  enabled: true
-  recent_window_seconds: 60
-  ttl_seconds: 3600
-
-logging:
-  enabled: true
-  log_dir: "./runtime/logs/obb/server"
-  level: "info"
-  console: true
-  file: true
-  flush_interval_sec: 3
-  max_file_size_mb: 50
-  max_files: 5

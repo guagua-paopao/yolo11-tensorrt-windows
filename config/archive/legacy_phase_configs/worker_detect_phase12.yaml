@@ -1,5 +1,4 @@
-# Current active Detect worker service.
-# Start: yolo11_worker.exe config/worker_detect.yaml --consumer-name worker_1
+# Phase 12.0 Detect worker config.
 server:
   host: "0.0.0.0"
   port: 8080
@@ -16,9 +15,19 @@ model:
 
 output:
   save_result_image: true
-  input_dir: "./runtime/input/images/detect"
-  output_dir: "./runtime/output/images/detect"
+  input_dir: "./temp/input"
+  output_dir: "./output"
   jpeg_quality: 90
+
+logging:
+  enabled: true
+  log_dir: "./logs"
+  level: "info"
+  console: true
+  file: true
+  flush_interval_sec: 3
+  max_file_size_mb: 50
+  max_files: 5
 
 redis:
   enabled: true
@@ -42,6 +51,11 @@ redis:
   enable_pending_reclaim: true
   pending_min_idle_ms: 10000
 
+metrics:
+  enabled: true
+  recent_window_seconds: 60
+  ttl_seconds: 3600
+
 worker:
   enabled: true
   worker_num: 1
@@ -51,18 +65,3 @@ worker:
   heartbeat_enabled: true
   heartbeat_interval_ms: 3000
   heartbeat_ttl_seconds: 15
-
-metrics:
-  enabled: true
-  recent_window_seconds: 60
-  ttl_seconds: 3600
-
-logging:
-  enabled: true
-  log_dir: "./runtime/logs/detect/worker"
-  level: "info"
-  console: true
-  file: true
-  flush_interval_sec: 3
-  max_file_size_mb: 50
-  max_files: 5

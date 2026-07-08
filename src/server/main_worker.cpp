@@ -134,8 +134,8 @@ namespace {
         std::cout << "Usage:\n"
             << "  yolo11_worker.exe <config.yaml> [--worker-num N] [--consumer-name worker_1] [--gpu-id 0]\n\n"
             << "Examples:\n"
-            << "  yolo11_worker.exe D:/tensorrtx/yolo11/config/server.yaml --worker-num 3\n"
-            << "  yolo11_worker.exe D:/tensorrtx/yolo11/config/server.yaml --consumer-name worker_1\n";
+            << "  yolo11_worker.exe D:/tensorrtx/yolo11/config/worker_detect.yaml --worker-num 1\n"
+            << "  yolo11_worker.exe D:/tensorrtx/yolo11/config/worker_detect.yaml --consumer-name worker_1\n";
     }
 
 }  // namespace

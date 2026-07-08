@@ -123,8 +123,8 @@ namespace {
         std::cout << "Usage:\n"
             << "  yolo11_video_worker.exe <config.yaml> [--worker-num N] [--consumer-name video_worker_1] [--gpu-id 0]\n\n"
             << "Examples:\n"
-            << "  yolo11_video_worker.exe D:/tensorrtx/yolo11/config/worker_video_phase13.yaml --consumer-name video_worker_1\n"
-            << "  yolo11_video_worker.exe D:/tensorrtx/yolo11/config/worker_video_phase13.yaml --worker-num 1\n";
+            << "  yolo11_video_worker.exe D:/tensorrtx/yolo11/config/worker_video.yaml --consumer-name video_worker_1\n"
+            << "  yolo11_video_worker.exe D:/tensorrtx/yolo11/config/worker_video.yaml --worker-num 1\n";
     }
 
 }  // namespace
