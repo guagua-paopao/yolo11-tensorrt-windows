@@ -37,6 +37,27 @@ namespace yolo11_server {
         int jpeg_quality = 90;
     };
 
+    struct VideoSection {
+        // Phase 13: video-file async inference. Keep this false for normal image detect/OBB servers.
+        bool enabled = false;
+        std::string input_dir = "./temp/video/input";
+        std::string output_dir = "./temp/video/output";
+
+        // Request/file limits for video upload. 0 means disabled.
+        long long max_video_bytes = 256LL * 1024LL * 1024LL;
+
+        // Worker updates Redis progress every N frames.
+        int progress_update_interval_frames = 30;
+
+        // Limit for early experiments. 0 means process all frames.
+        int max_process_frames = 0;
+
+        // Output writer settings. mp4v works on most Windows OpenCV builds.
+        std::string output_extension = ".mp4";
+        std::string output_fourcc = "mp4v";
+        double fallback_fps = 25.0;
+    };
+
     struct RedisSection {
         bool enabled = true;
         std::string host = "127.0.0.1";
@@ -124,6 +145,7 @@ namespace yolo11_server {
         ServerSection server;
         ModelSection model;
         OutputSection output;
+        VideoSection video;
         RedisSection redis;
         LoggingSection logging;
         WorkerSection worker;

@@ -429,3 +429,50 @@ endif()
 
 add_dependencies(yolo11_worker myplugins)
 copy_myplugins_to_target(yolo11_worker)
+
+# ============================================================
+# Phase 13: YOLO11 video-file async worker process
+# Dedicated long-task worker for POST /api/v1/detect/video/async
+# ============================================================
+add_executable(yolo11_video_worker
+    ${PROJECT_SOURCE_DIR}/src/server/main_video_worker.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/app_config.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/app_logger.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/image_codec.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/label_map.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/result_serializer.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/model_runner.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/redis_task_queue.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/video_inference_worker.cpp
+)
+
+target_compile_definitions(yolo11_video_worker PRIVATE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+)
+
+if(MSVC)
+    target_compile_options(yolo11_video_worker PRIVATE /utf-8)
+endif()
+
+target_include_directories(yolo11_video_worker PRIVATE
+    "${PROJECT_INCLUDE_DIR}"
+    "${PROJECT_PLUGIN_DIR}"
+)
+
+target_link_libraries(yolo11_video_worker PRIVATE
+    yolo11_runtime
+    myplugins
+
+    nlohmann_json::nlohmann_json
+    yaml-cpp::yaml-cpp
+    spdlog::spdlog
+    ${YOLO11_HIREDIS_TARGET}
+)
+
+if(WIN32)
+    target_link_libraries(yolo11_video_worker PRIVATE ws2_32)
+endif()
+
+add_dependencies(yolo11_video_worker myplugins)
+copy_myplugins_to_target(yolo11_video_worker)

@@ -14,6 +14,7 @@ namespace yolo11_server {
     struct RedisTask {
         std::string stream_id;
         std::string task_id;
+        std::string task_kind = "image";
         std::string model_type = "detect";
 
         // Production path: image bytes are stored in Redis, so server/worker can be separated.
@@ -23,6 +24,11 @@ namespace yolo11_server {
         // Backward-compatible fallback for all-in-one/local-file mode.
         std::string input_image_path;
 
+        // Phase 13 video-file task fields. Videos stay on local disk, not in Redis binary.
+        std::string input_video_path;
+        std::string output_video_path;
+        std::string output_video_filename;
+
         long long create_time_ms = 0;
     };
 
@@ -30,6 +36,7 @@ namespace yolo11_server {
         bool found = false;
         std::string task_id;
         std::string status;
+        std::string task_kind;
         std::string model_type;
         std::string error;
         std::string result_json_text;
@@ -37,6 +44,9 @@ namespace yolo11_server {
         std::string result_image_key;
         std::string result_image_path;
         std::string result_image_filename;
+        std::string input_video_path;
+        std::string output_video_path;
+        std::string output_video_filename;
         std::string worker_id;
         std::string consumer_name;
         long long create_time_ms = 0;
@@ -45,6 +55,18 @@ namespace yolo11_server {
         long long queue_wait_ms = 0;
         double infer_ms = 0.0;
         long long total_ms = 0;
+
+        // Phase 13 video progress fields.
+        long long total_frames = 0;
+        long long processed_frames = 0;
+        long long current_frame_index = 0;
+        double progress = 0.0;
+        double fps = 0.0;
+        int video_width = 0;
+        int video_height = 0;
+        long long duration_ms = 0;
+        long long process_ms = 0;
+        bool cancel_requested = false;
     };
 
     struct RedisStreamStats {
@@ -147,6 +169,56 @@ namespace yolo11_server {
             const std::string& consumer_name,
             std::string& error
         ) const;
+
+        bool updateVideoProgress(
+            const std::string& task_id,
+            long long processed_frames,
+            long long total_frames,
+            long long current_frame_index,
+            double progress,
+            double fps,
+            int width,
+            int height,
+            long long process_ms,
+            std::string& error
+        ) const;
+
+        bool markVideoDone(
+            const std::string& task_id,
+            const std::string& result_json_text,
+            const std::string& output_video_path,
+            const std::string& output_video_filename,
+            long long finish_time_ms,
+            long long queue_wait_ms,
+            long long process_ms,
+            long long total_ms,
+            long long processed_frames,
+            long long total_frames,
+            double fps,
+            int width,
+            int height,
+            long long duration_ms,
+            int worker_id,
+            const std::string& consumer_name,
+            std::string& error
+        ) const;
+
+        bool markVideoCanceled(
+            const std::string& task_id,
+            const std::string& result_json_text,
+            long long finish_time_ms,
+            long long queue_wait_ms,
+            long long process_ms,
+            long long total_ms,
+            long long processed_frames,
+            long long total_frames,
+            int worker_id,
+            const std::string& consumer_name,
+            std::string& error
+        ) const;
+
+        bool requestCancelTask(const std::string& task_id, std::string& error) const;
+        bool isCancelRequested(const std::string& task_id, bool& cancel_requested, std::string& error) const;
 
         bool getTaskStatus(const std::string& task_id, RedisTaskStatus& status, std::string& error) const;
 
