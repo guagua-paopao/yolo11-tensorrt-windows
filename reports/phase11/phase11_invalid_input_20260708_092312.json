@@ -1,0 +1,11 @@
+{
+  "phase": "phase11_0_invalid_input_test",
+  "started_at": "2026-07-08T09:23:12",
+  "submit_http_status": 400,
+  "submit_response": {
+    "error": "failed to decode image. Please upload a valid jpg/png image.",
+    "error_code": "IMAGE_DECODE_FAILED",
+    "success": false
+  },
+  "verdict": "PASS_HTTP_REJECTED"
+}

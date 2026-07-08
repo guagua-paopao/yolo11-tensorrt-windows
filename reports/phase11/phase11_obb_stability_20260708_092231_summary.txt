@@ -1,0 +1,9 @@
+Phase 11.0 OBB Stability Suite Summary
+=======================================
+elapsed_seconds: 3.025951499999792
+throughput_qps:  33.04745631250431
+status_counts:   {'done': 100}
+worker_dist:     {'obb_worker_1': 100}
+redis_xpending:  {'available': False, 'pending': None, 'raw': 'redis-cli not found: redis-cli', 'cmd': 'redis-cli -h 172.19.196.109 -p 6379 XPENDING yolo:stream:obb yolo11_obb_group'}
+json_report:     reports\phase11\phase11_obb_stability_20260708_092231.json
+csv_tasks:       reports\phase11\phase11_obb_stability_20260708_092231_tasks.csv

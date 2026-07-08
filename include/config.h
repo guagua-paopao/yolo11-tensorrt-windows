@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 // #define USE_FP32
 #define USE_FP16
