@@ -68,6 +68,45 @@ namespace yolo11_server {
             config.output.jpeg_quality = 100;
         }
 
+
+        auto video = root["video"];
+        config.video.enabled = readOrDefault<bool>(video, "enabled", config.video.enabled);
+        config.video.input_dir = readOrDefault<std::string>(video, "input_dir", config.video.input_dir);
+        config.video.output_dir = readOrDefault<std::string>(video, "output_dir", config.video.output_dir);
+        config.video.max_video_bytes = readOrDefault<long long>(video, "max_video_bytes", config.video.max_video_bytes);
+        config.video.progress_update_interval_frames = readOrDefault<int>(video, "progress_update_interval_frames", config.video.progress_update_interval_frames);
+        config.video.max_process_frames = readOrDefault<int>(video, "max_process_frames", config.video.max_process_frames);
+        config.video.output_extension = readOrDefault<std::string>(video, "output_extension", config.video.output_extension);
+        config.video.output_fourcc = readOrDefault<std::string>(video, "output_fourcc", config.video.output_fourcc);
+        config.video.fallback_fps = readOrDefault<double>(video, "fallback_fps", config.video.fallback_fps);
+        if (config.video.input_dir.empty()) {
+            config.video.input_dir = "./temp/video/input";
+        }
+        if (config.video.output_dir.empty()) {
+            config.video.output_dir = "./temp/video/output";
+        }
+        if (config.video.max_video_bytes < 0) {
+            config.video.max_video_bytes = 0;
+        }
+        if (config.video.progress_update_interval_frames <= 0) {
+            config.video.progress_update_interval_frames = 30;
+        }
+        if (config.video.max_process_frames < 0) {
+            config.video.max_process_frames = 0;
+        }
+        if (config.video.output_extension.empty()) {
+            config.video.output_extension = ".mp4";
+        }
+        if (!config.video.output_extension.empty() && config.video.output_extension[0] != '.') {
+            config.video.output_extension = "." + config.video.output_extension;
+        }
+        if (config.video.output_fourcc.size() != 4) {
+            config.video.output_fourcc = "mp4v";
+        }
+        if (config.video.fallback_fps <= 0.0 || config.video.fallback_fps > 240.0) {
+            config.video.fallback_fps = 25.0;
+        }
+
         auto redis = root["redis"];
         config.redis.enabled = readOrDefault<bool>(redis, "enabled", config.redis.enabled);
         config.redis.host = readOrDefault<std::string>(redis, "host", config.redis.host);

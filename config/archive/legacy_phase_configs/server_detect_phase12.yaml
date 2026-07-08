@@ -1,10 +1,10 @@
-# Current active OBB HTTP producer/query service.
-# Start: yolo11_server.exe config/server_obb.yaml
-active_model: "obb"
+# Phase 12.0 Detect HTTP producer/query service.
+# Run together with server_obb_phase12.yaml on a different port.
+active_model: "detect"
 
 server:
   host: "0.0.0.0"
-  port: 8081
+  port: 8080
   threads: 4
   enable_sync_detect: false
   max_body_size_mb: 16
@@ -21,6 +21,7 @@ models:
     consumer_name_prefix: "worker_"
     worker_num: 1
     min_alive_workers: 1
+
   obb:
     type: "obb"
     engine_path: "D:/tensorrtx/yolo11/engines/yolo11n-obb.engine"
@@ -35,9 +36,19 @@ models:
 
 output:
   save_result_image: true
-  input_dir: "./runtime/input/images/obb"
-  output_dir: "./runtime/output/images/obb"
+  input_dir: "./temp/input"
+  output_dir: "./output"
   jpeg_quality: 90
+
+logging:
+  enabled: true
+  log_dir: "./logs"
+  level: "info"
+  console: true
+  file: true
+  flush_interval_sec: 3
+  max_file_size_mb: 50
+  max_files: 5
 
 redis:
   enabled: true
@@ -45,9 +56,9 @@ redis:
   port: 6379
   password: ""
   db: 0
-  stream_key: "yolo:stream:obb"
-  consumer_group: "yolo11_obb_group"
-  consumer_name: "obb_worker_1"
+  stream_key: "yolo:stream:detect"
+  consumer_group: "yolo11_group"
+  consumer_name: "worker_1"
   block_ms: 500
   ttl_seconds: 1800
   task_ttl_seconds: 1800
@@ -61,27 +72,17 @@ redis:
   enable_pending_reclaim: true
   pending_min_idle_ms: 10000
 
-worker:
-  enabled: false
-  worker_num: 1
-  min_alive_workers: 1
-  consumer_name_prefix: "obb_worker_"
-  log_task_done: true
-  heartbeat_enabled: true
-  heartbeat_interval_ms: 3000
-  heartbeat_ttl_seconds: 15
-
 metrics:
   enabled: true
   recent_window_seconds: 60
   ttl_seconds: 3600
 
-logging:
-  enabled: true
-  log_dir: "./runtime/logs/obb/server"
-  level: "info"
-  console: true
-  file: true
-  flush_interval_sec: 3
-  max_file_size_mb: 50
-  max_files: 5
+worker:
+  enabled: false
+  worker_num: 1
+  min_alive_workers: 1
+  consumer_name_prefix: "worker_"
+  log_task_done: false
+  heartbeat_enabled: true
+  heartbeat_interval_ms: 3000
+  heartbeat_ttl_seconds: 15

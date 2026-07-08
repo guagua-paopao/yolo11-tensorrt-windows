@@ -9,6 +9,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -26,8 +27,7 @@
 
 #include "server/app_config.h"
 #include "server/app_logger.h"
-#include "server/inference_service.h"
-#include "server/inference_worker.h"
+#include "server/video_inference_worker.h"
 
 namespace {
 
@@ -42,17 +42,13 @@ namespace {
 
     void waitForStop() {
         std::unique_lock<std::mutex> lock(g_stop_mutex);
-        g_stop_cv.wait(lock, []() {
-            return g_stop_requested.load();
-            });
+        g_stop_cv.wait(lock, []() { return g_stop_requested.load(); });
     }
 
     [[noreturn]] void terminateHandler() noexcept {
-        std::cerr << "Fatal worker error: std::terminate called." << std::endl;
+        std::cerr << "Fatal video worker error: std::terminate called." << std::endl;
         std::cerr.flush();
 #ifdef _WIN32
-        // Worker processes should not block deployment scripts with a CRT dialog.
-        // Use a hard process exit after flushing logs.
         ExitProcess(static_cast<UINT>(EXIT_FAILURE));
 #else
         std::_Exit(EXIT_FAILURE);
@@ -61,24 +57,17 @@ namespace {
 
 #ifdef _WIN32
     void configureWindowsProcessForService() {
-        // Avoid Windows error-reporting popup dialogs in unattended worker processes.
         SetErrorMode(
             SEM_FAILCRITICALERRORS |
             SEM_NOGPFAULTERRORBOX |
             SEM_NOOPENFILEERRORBOX
         );
-
-        // Avoid the Microsoft Visual C++ Runtime Library abort dialog.
         _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
-
 #ifdef _DEBUG
-        // In Debug builds, route CRT warnings/errors/asserts to stderr instead of modal dialogs.
         _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE);
         _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
-
         _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
         _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
-
         _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
         _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
 #endif
@@ -96,7 +85,7 @@ namespace {
         case CTRL_CLOSE_EVENT:
         case CTRL_BREAK_EVENT:
         case CTRL_SHUTDOWN_EVENT:
-            std::cout << "Stop signal received. Stopping YOLO11 worker..." << std::endl;
+            std::cout << "Stop signal received. Stopping YOLO11 video worker..." << std::endl;
             requestStop();
             return TRUE;
         default:
@@ -132,10 +121,10 @@ namespace {
 
     void printUsage() {
         std::cout << "Usage:\n"
-            << "  yolo11_worker.exe <config.yaml> [--worker-num N] [--consumer-name worker_1] [--gpu-id 0]\n\n"
+            << "  yolo11_video_worker.exe <config.yaml> [--worker-num N] [--consumer-name video_worker_1] [--gpu-id 0]\n\n"
             << "Examples:\n"
-            << "  yolo11_worker.exe D:/tensorrtx/yolo11/config/worker_detect.yaml --worker-num 1\n"
-            << "  yolo11_worker.exe D:/tensorrtx/yolo11/config/worker_detect.yaml --consumer-name worker_1\n";
+            << "  yolo11_video_worker.exe D:/tensorrtx/yolo11/config/worker_video.yaml --consumer-name video_worker_1\n"
+            << "  yolo11_video_worker.exe D:/tensorrtx/yolo11/config/worker_video.yaml --worker-num 1\n";
     }
 
 }  // namespace
@@ -180,16 +169,16 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        yolo11_server::AppConfig app_config =
-            yolo11_server::AppConfig::loadFromYaml(config_path);
-
-        std::string logger_error;
-        if (!yolo11_server::initializeLogger(app_config, "worker", logger_error)) {
-            spdlog::warn("Failed to initialize spdlog logger: {}", logger_error);
-        }
-
+        yolo11_server::AppConfig app_config = yolo11_server::AppConfig::loadFromYaml(config_path);
         app_config.redis.enabled = true;
         app_config.worker.enabled = true;
+        app_config.video.enabled = true;
+        app_config.model.type = "detect";
+
+        std::string logger_error;
+        if (!yolo11_server::initializeLogger(app_config, "video_worker", logger_error)) {
+            spdlog::warn("Failed to initialize spdlog logger: {}", logger_error);
+        }
 
         int worker_num_override = 0;
         if (readIntArg(argc, argv, "--worker-num", worker_num_override) && worker_num_override > 0) {
@@ -205,64 +194,58 @@ int main(int argc, char** argv) {
         const bool single_consumer_mode = readStringArg(argc, argv, "--consumer-name", consumer_name_override)
             && !consumer_name_override.empty();
 
-        if (app_config.model.type != "detect" && app_config.model.type != "obb") {
-            std::cerr << "yolo11_worker supports model.type=detect or model.type=obb. Current model.type="
-                << app_config.model.type << std::endl;
-#ifdef _WIN32
-            WSACleanup();
-#endif
-            return -1;
-        }
-
-        spdlog::info("YOLO11 worker process starting.");
+        spdlog::info("YOLO11 video worker process starting.");
         spdlog::info("Config path: {}", config_path);
         spdlog::info("Redis: {}:{}, stream={}, group={}",
             app_config.redis.host, app_config.redis.port, app_config.redis.stream_key, app_config.redis.consumer_group);
         spdlog::info("Engine: {}", app_config.model.engine_path);
-        spdlog::info("Labels: {}", app_config.model.labels_path);
         spdlog::info("GPU id: {}", app_config.model.gpu_id);
+        spdlog::info("Video input_dir={}, output_dir={}", app_config.video.input_dir, app_config.video.output_dir);
 
+        std::vector<std::unique_ptr<yolo11_server::VideoInferenceWorker>> workers;
         if (single_consumer_mode) {
-            spdlog::info("Worker mode: single consumer, consumer_name={}", consumer_name_override);
-
-            yolo11_server::InferenceWorker worker(1, app_config, consumer_name_override);
-            if (!worker.start()) {
-                spdlog::error("Failed to start worker: {}", consumer_name_override);
+            spdlog::info("Video worker mode: single consumer, consumer_name={}", consumer_name_override);
+            auto worker = std::make_unique<yolo11_server::VideoInferenceWorker>(1, app_config, consumer_name_override);
+            if (!worker->start()) {
+                spdlog::error("Failed to start video worker: {}", consumer_name_override);
 #ifdef _WIN32
                 WSACleanup();
 #endif
                 return -1;
             }
-
-            waitForStop();
-            spdlog::info("Stopping worker: {}", consumer_name_override);
-            worker.stop();
+            workers.push_back(std::move(worker));
         }
         else {
-            spdlog::info("Worker mode: internal worker pool, worker_num={}", app_config.worker.worker_num);
-
-            yolo11_server::InferenceService service(app_config);
-            if (!service.start()) {
-                spdlog::error("Failed to start worker service.");
+            spdlog::info("Video worker mode: internal worker pool, worker_num={}", app_config.worker.worker_num);
+            for (int i = 1; i <= app_config.worker.worker_num; ++i) {
+                const std::string consumer_name = app_config.worker.consumer_name_prefix + std::to_string(i);
+                auto worker = std::make_unique<yolo11_server::VideoInferenceWorker>(i, app_config, consumer_name);
+                if (!worker->start()) {
+                    spdlog::error("Failed to start video worker: {}", consumer_name);
 #ifdef _WIN32
-                WSACleanup();
+                    WSACleanup();
 #endif
-                return -1;
+                    return -1;
+                }
+                workers.push_back(std::move(worker));
             }
-
-            waitForStop();
-            spdlog::info("Stopping worker service.");
-            service.stop();
         }
 
-        spdlog::info("YOLO11 worker process stopped.");
+        waitForStop();
+        spdlog::info("Stopping video workers...");
+        for (auto& worker : workers) {
+            if (worker) {
+                worker->stop();
+            }
+        }
+        spdlog::info("YOLO11 video worker process stopped.");
     }
     catch (const std::exception& e) {
-        spdlog::error("Fatal worker error: {}", e.what());
+        spdlog::error("Fatal video worker error: {}", e.what());
         exit_code = -1;
     }
     catch (...) {
-        spdlog::error("Fatal worker error: unknown exception");
+        spdlog::error("Fatal video worker error: unknown exception");
         exit_code = -1;
     }
 

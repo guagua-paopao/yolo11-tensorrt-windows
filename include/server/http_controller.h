@@ -34,14 +34,21 @@ namespace yolo11_server {
         crow::response handleDetectImage(const crow::request& request);
         crow::response handleDetectImageAsync(const crow::request& request);
         crow::response handleDetectObbImageAsync(const crow::request& request);
+        crow::response handleDetectVideoAsync(const crow::request& request);
         crow::response handleImageAsync(const crow::request& request, const std::string& expected_model_type);
         crow::response handleGetAsyncResult(const std::string& task_id) const;
+        crow::response handleGetVideoResult(const std::string& task_id) const;
+        crow::response handleGetVideoFile(const std::string& task_id) const;
+        crow::response handleCancelVideoTask(const std::string& task_id) const;
+        crow::response handleCleanupVideoTask(const std::string& task_id) const;
         crow::response handleGetResultImageByTaskId(const std::string& task_id) const;
         crow::response handleGetResultImage(const std::string& filename) const;
 
         std::string extractImageBytes(const crow::request& request, std::string& error_message) const;
+        std::string extractVideoBytes(const crow::request& request, std::string& error_message) const;
         bool validateBodySize(const crow::request& request, std::string& error_message) const;
         bool validateRedisImageSize(size_t bytes, const std::string& field_name, std::string& error_message) const;
+        bool validateVideoSize(size_t bytes, std::string& error_message) const;
         bool redisMemoryOverLimit(nlohmann::json* memory_json, std::string& error_message) const;
         bool isTrueParam(const char* value) const;
 
@@ -49,9 +56,13 @@ namespace yolo11_server {
         std::string makeResultImageFilename(unsigned long long request_id) const;
         std::string makeInputImagePath(const std::string& task_id) const;
         std::string makeResultImagePath(const std::string& filename) const;
+        std::string makeInputVideoPath(const std::string& task_id) const;
+        std::string makeOutputVideoFilename(const std::string& task_id) const;
+        std::string makeOutputVideoPath(const std::string& filename) const;
 
         bool isSafeImageFilename(const std::string& filename) const;
         std::string guessImageContentType(const std::string& filename) const;
+        static bool readWholeFileBinaryToString(const std::string& path, std::string& bytes);
 
         static long long nowMs();
 

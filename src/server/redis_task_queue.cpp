@@ -320,11 +320,18 @@ namespace yolo11_server {
             }
 
             task.task_id = fields["task_id"];
+            task.task_kind = fields["task_kind"];
             task.model_type = fields["model_type"];
             task.input_image_path = fields["input_image_path"];
             task.input_image_key = fields["input_image_key"];
             task.result_image_key = fields["result_image_key"];
+            task.input_video_path = fields["input_video_path"];
+            task.output_video_path = fields["output_video_path"];
+            task.output_video_filename = fields["output_video_filename"];
             task.create_time_ms = parseLongLong(fields["create_time_ms"]);
+            if (task.task_kind.empty()) {
+                task.task_kind = task.input_video_path.empty() ? "image" : "video";
+            }
             if (task.model_type.empty()) {
                 task.model_type = "detect";
             }
@@ -333,7 +340,13 @@ namespace yolo11_server {
                 error = "invalid redis stream message: missing stream_id/task_id";
                 return false;
             }
-            if (task.input_image_key.empty() && task.input_image_path.empty()) {
+            if (task.task_kind == "video") {
+                if (task.input_video_path.empty() || task.output_video_path.empty()) {
+                    error = "invalid redis stream message: missing input_video_path/output_video_path";
+                    return false;
+                }
+            }
+            else if (task.input_image_key.empty() && task.input_image_path.empty()) {
                 error = "invalid redis stream message: missing input_image_key/input_image_path";
                 return false;
             }
@@ -535,24 +548,38 @@ namespace yolo11_server {
             context_,
             error,
             10000,
-            "HSET %s task_id %s model_type %s input_image_path %s input_image_key %s result_image_key %s create_time_ms %lld start_time_ms %lld finish_time_ms %lld queue_wait_ms %lld infer_ms %s total_ms %lld worker_id %s consumer_name %s error %s result_image_path %s result_image_filename %s",
+            "HSET %s task_id %s task_kind %s model_type %s input_image_path %s input_image_key %s result_image_key %s input_video_path %s output_video_path %s output_video_filename %s create_time_ms %lld start_time_ms %lld finish_time_ms %lld queue_wait_ms %lld infer_ms %s process_ms %lld total_ms %lld worker_id %s consumer_name %s error %s result_image_path %s result_image_filename %s progress %s processed_frames %lld total_frames %lld current_frame_index %lld cancel_requested %s fps %.6f video_width %d video_height %d duration_ms %lld",
             meta_key.c_str(),
             task.task_id.c_str(),
+            task.task_kind.empty() ? "image" : task.task_kind.c_str(),
             task.model_type.empty() ? "detect" : task.model_type.c_str(),
             task.input_image_path.c_str(),
             task.input_image_key.c_str(),
             task.result_image_key.c_str(),
+            task.input_video_path.c_str(),
+            task.output_video_path.c_str(),
+            task.output_video_filename.c_str(),
             task.create_time_ms,
             0LL,
             0LL,
             0LL,
             "0",
             0LL,
+            0LL,
             empty,
             empty,
             empty,
             empty,
-            empty
+            empty,
+            "0",
+            0LL,
+            task.video_total_frames,
+            0LL,
+            "0",
+            task.video_fps,
+            task.video_width,
+            task.video_height,
+            task.video_duration_ms
         );
         if (replyIsError(meta_reply.get(), error, context_)) {
             return false;
@@ -567,13 +594,17 @@ namespace yolo11_server {
             context_,
             error,
             10000,
-            "XADD %s * task_id %s model_type %s input_image_key %s result_image_key %s input_image_path %s create_time_ms %lld",
+            "XADD %s * task_id %s task_kind %s model_type %s input_image_key %s result_image_key %s input_image_path %s input_video_path %s output_video_path %s output_video_filename %s create_time_ms %lld",
             config_.stream_key.c_str(),
             task.task_id.c_str(),
+            task.task_kind.empty() ? "image" : task.task_kind.c_str(),
             task.model_type.empty() ? "detect" : task.model_type.c_str(),
             task.input_image_key.c_str(),
             task.result_image_key.c_str(),
             task.input_image_path.c_str(),
+            task.input_video_path.c_str(),
+            task.output_video_path.c_str(),
+            task.output_video_filename.c_str(),
             task.create_time_ms
         );
         if (replyIsError(stream_reply.get(), error, context_)) {
@@ -814,6 +845,281 @@ namespace yolo11_server {
         return true;
     }
 
+    bool RedisTaskQueue::updateVideoProgress(
+        const std::string& task_id,
+        long long processed_frames,
+        long long total_frames,
+        long long current_frame_index,
+        double progress,
+        double fps,
+        int width,
+        int height,
+        long long process_ms,
+        std::string& error
+    ) const {
+        std::lock_guard<std::mutex> lock(context_mutex_);
+
+        const std::string meta_key = metaKey(task_id);
+        RedisReplyPtr meta_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "HSET %s processed_frames %lld total_frames %lld current_frame_index %lld progress %.6f fps %.6f video_width %d video_height %d process_ms %lld",
+            meta_key.c_str(),
+            processed_frames,
+            total_frames,
+            current_frame_index,
+            progress,
+            fps,
+            width,
+            height,
+            process_ms
+        );
+        if (replyIsError(meta_reply.get(), error, context_)) {
+            return false;
+        }
+        return expireKey(context_, meta_key, taskTtlSeconds(config_), error);
+    }
+
+    bool RedisTaskQueue::markVideoDone(
+        const std::string& task_id,
+        const std::string& result_json_text,
+        const std::string& output_video_path,
+        const std::string& output_video_filename,
+        long long finish_time_ms,
+        long long queue_wait_ms,
+        long long process_ms,
+        long long total_ms,
+        long long processed_frames,
+        long long total_frames,
+        double fps,
+        int width,
+        int height,
+        long long duration_ms,
+        int worker_id,
+        const std::string& consumer_name,
+        std::string& error
+    ) const {
+        std::lock_guard<std::mutex> lock(context_mutex_);
+
+        const std::string status_key = statusKey(task_id);
+        const std::string result_key = resultKey(task_id);
+        const std::string meta_key = metaKey(task_id);
+        const char* empty = "";
+
+        RedisReplyPtr result_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "SETEX %s %d %s",
+            result_key.c_str(),
+            taskTtlSeconds(config_),
+            result_json_text.c_str()
+        );
+        if (replyIsError(result_reply.get(), error, context_)) {
+            return false;
+        }
+
+        RedisReplyPtr meta_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "HSET %s finish_time_ms %lld output_video_path %s output_video_filename %s queue_wait_ms %lld infer_ms %.6f process_ms %lld total_ms %lld processed_frames %lld total_frames %lld current_frame_index %lld progress %.6f fps %.6f video_width %d video_height %d duration_ms %lld worker_id %d consumer_name %s error %s",
+            meta_key.c_str(),
+            finish_time_ms,
+            output_video_path.c_str(),
+            output_video_filename.c_str(),
+            queue_wait_ms,
+            static_cast<double>(process_ms),
+            process_ms,
+            total_ms,
+            processed_frames,
+            total_frames,
+            processed_frames,
+            1.0,
+            fps,
+            width,
+            height,
+            duration_ms,
+            worker_id,
+            consumer_name.c_str(),
+            empty
+        );
+        if (replyIsError(meta_reply.get(), error, context_)) {
+            return false;
+        }
+
+        if (!expireKey(context_, meta_key, taskTtlSeconds(config_), error)) {
+            return false;
+        }
+
+        RedisReplyPtr status_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "SETEX %s %d %s",
+            status_key.c_str(),
+            taskTtlSeconds(config_),
+            "done"
+        );
+        if (replyIsError(status_reply.get(), error, context_)) {
+            return false;
+        }
+
+        if (config_.metrics_enabled) {
+            std::string metrics_error;
+            const std::string global_key = metricsGlobalKey();
+            const std::string worker_done_key = metricsWorkerDoneKey();
+            const std::string recent_key = metricsRecentDoneKey();
+            const std::string recent_member = std::to_string(finish_time_ms) + ":" + task_id;
+
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HINCRBY %s done_count 1", global_key.c_str());
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HINCRBYFLOAT %s total_queue_wait_ms %.6f", global_key.c_str(), static_cast<double>(queue_wait_ms));
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HINCRBYFLOAT %s total_inference_ms %.6f", global_key.c_str(), static_cast<double>(process_ms));
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HINCRBYFLOAT %s total_total_ms %.6f", global_key.c_str(), static_cast<double>(total_ms));
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HSET %s last_finish_time_ms %lld last_task_id %s",
+                global_key.c_str(), finish_time_ms, task_id.c_str());
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "HINCRBY %s %s 1", worker_done_key.c_str(), consumer_name.c_str());
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "ZADD %s %lld %s", recent_key.c_str(), finish_time_ms, recent_member.c_str());
+            commandWithReconnectLocked(config_, context_, metrics_error, 10000,
+                "EXPIRE %s %d", recent_key.c_str(), config_.metrics_ttl_seconds);
+        }
+
+        return true;
+    }
+
+    bool RedisTaskQueue::markVideoCanceled(
+        const std::string& task_id,
+        const std::string& result_json_text,
+        long long finish_time_ms,
+        long long queue_wait_ms,
+        long long process_ms,
+        long long total_ms,
+        long long processed_frames,
+        long long total_frames,
+        int worker_id,
+        const std::string& consumer_name,
+        std::string& error
+    ) const {
+        std::lock_guard<std::mutex> lock(context_mutex_);
+
+        const std::string status_key = statusKey(task_id);
+        const std::string result_key = resultKey(task_id);
+        const std::string meta_key = metaKey(task_id);
+
+        RedisReplyPtr result_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "SETEX %s %d %s",
+            result_key.c_str(),
+            taskTtlSeconds(config_),
+            result_json_text.c_str()
+        );
+        if (replyIsError(result_reply.get(), error, context_)) {
+            return false;
+        }
+
+        RedisReplyPtr meta_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "HSET %s finish_time_ms %lld queue_wait_ms %lld process_ms %lld total_ms %lld processed_frames %lld total_frames %lld progress %.6f worker_id %d consumer_name %s error %s cancel_requested %s",
+            meta_key.c_str(),
+            finish_time_ms,
+            queue_wait_ms,
+            process_ms,
+            total_ms,
+            processed_frames,
+            total_frames,
+            total_frames > 0 ? static_cast<double>(processed_frames) / static_cast<double>(total_frames) : 0.0,
+            worker_id,
+            consumer_name.c_str(),
+            "canceled by user",
+            "1"
+        );
+        if (replyIsError(meta_reply.get(), error, context_)) {
+            return false;
+        }
+        if (!expireKey(context_, meta_key, taskTtlSeconds(config_), error)) {
+            return false;
+        }
+
+        RedisReplyPtr status_reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "SETEX %s %d %s",
+            status_key.c_str(),
+            taskTtlSeconds(config_),
+            "canceled"
+        );
+        return !replyIsError(status_reply.get(), error, context_);
+    }
+
+    bool RedisTaskQueue::requestCancelTask(const std::string& task_id, std::string& error) const {
+        if (task_id.empty()) {
+            error = "empty task_id";
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(context_mutex_);
+        const std::string meta_key = metaKey(task_id);
+        RedisReplyPtr reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "HSET %s cancel_requested 1",
+            meta_key.c_str()
+        );
+        if (replyIsError(reply.get(), error, context_)) {
+            return false;
+        }
+        return expireKey(context_, meta_key, taskTtlSeconds(config_), error);
+    }
+
+    bool RedisTaskQueue::isCancelRequested(const std::string& task_id, bool& cancel_requested, std::string& error) const {
+        cancel_requested = false;
+        if (task_id.empty()) {
+            error = "empty task_id";
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(context_mutex_);
+        const std::string meta_key = metaKey(task_id);
+        RedisReplyPtr reply = commandWithReconnectLocked(
+            config_,
+            context_,
+            error,
+            10000,
+            "HGET %s cancel_requested",
+            meta_key.c_str()
+        );
+        if (replyIsError(reply.get(), error, context_)) {
+            return false;
+        }
+        if (reply->type == REDIS_REPLY_NIL) {
+            return true;
+        }
+        cancel_requested = parseLongLong(replyString(reply.get())) != 0;
+        return true;
+    }
+
     bool RedisTaskQueue::getTaskStatus(const std::string& task_id, RedisTaskStatus& status, std::string& error) const {
         status = RedisTaskStatus{};
         status.task_id = task_id;
@@ -858,11 +1164,15 @@ namespace yolo11_server {
                 return it == values.end() ? std::string{} : it->second;
                 };
             status.error = getValue("error");
+            status.task_kind = getValue("task_kind");
             status.model_type = getValue("model_type");
             status.input_image_key = getValue("input_image_key");
             status.result_image_key = getValue("result_image_key");
             status.result_image_path = getValue("result_image_path");
             status.result_image_filename = getValue("result_image_filename");
+            status.input_video_path = getValue("input_video_path");
+            status.output_video_path = getValue("output_video_path");
+            status.output_video_filename = getValue("output_video_filename");
             status.worker_id = getValue("worker_id");
             status.consumer_name = getValue("consumer_name");
             status.create_time_ms = parseLongLong(getValue("create_time_ms"));
@@ -871,9 +1181,19 @@ namespace yolo11_server {
             status.queue_wait_ms = parseLongLong(getValue("queue_wait_ms"));
             status.infer_ms = parseDouble(getValue("infer_ms"));
             status.total_ms = parseLongLong(getValue("total_ms"));
+            status.total_frames = parseLongLong(getValue("total_frames"));
+            status.processed_frames = parseLongLong(getValue("processed_frames"));
+            status.current_frame_index = parseLongLong(getValue("current_frame_index"));
+            status.progress = parseDouble(getValue("progress"));
+            status.fps = parseDouble(getValue("fps"));
+            status.video_width = static_cast<int>(parseLongLong(getValue("video_width")));
+            status.video_height = static_cast<int>(parseLongLong(getValue("video_height")));
+            status.duration_ms = parseLongLong(getValue("duration_ms"));
+            status.process_ms = parseLongLong(getValue("process_ms"));
+            status.cancel_requested = parseLongLong(getValue("cancel_requested")) != 0;
         }
 
-        if (status.status == "done") {
+        if (status.status == "done" || status.status == "canceled") {
             RedisReplyPtr result_reply = commandWithReconnectLocked(
                 config_,
                 context_,

@@ -1,11 +1,9 @@
-# Current active Detect worker service.
-# Start: yolo11_worker.exe config/worker_detect.yaml --consumer-name worker_1
 server:
   host: "0.0.0.0"
-  port: 8080
+  port: 8082
   threads: 4
   enable_sync_detect: false
-  max_body_size_mb: 16
+  max_body_size_mb: 256
 
 model:
   type: "detect"
@@ -16,9 +14,20 @@ model:
 
 output:
   save_result_image: true
-  input_dir: "./runtime/input/images/detect"
-  output_dir: "./runtime/output/images/detect"
+  input_dir: "./temp/input"
+  output_dir: "./output"
   jpeg_quality: 90
+
+video:
+  enabled: true
+  input_dir: "./temp/video/input"
+  output_dir: "./temp/video/output"
+  max_video_bytes: 268435456
+  progress_update_interval_frames: 10
+  max_process_frames: 0
+  output_extension: ".mp4"
+  output_fourcc: "mp4v"
+  fallback_fps: 25.0
 
 redis:
   enabled: true
@@ -26,12 +35,12 @@ redis:
   port: 6379
   password: ""
   db: 0
-  stream_key: "yolo:stream:detect"
-  consumer_group: "yolo11_group"
-  consumer_name: "worker_1"
+  stream_key: "yolo:stream:video:detect"
+  consumer_group: "yolo11_video_detect_group"
+  consumer_name: "video_worker_1"
   block_ms: 500
   ttl_seconds: 1800
-  task_ttl_seconds: 1800
+  task_ttl_seconds: 7200
   input_image_ttl_seconds: 600
   result_image_ttl_seconds: 1800
   max_image_bytes: 5242880
@@ -40,14 +49,14 @@ redis:
   max_redis_used_memory_mb: 2048
   stream_max_len: 10000
   enable_pending_reclaim: true
-  pending_min_idle_ms: 10000
+  pending_min_idle_ms: 60000
 
 worker:
-  enabled: true
+  enabled: false
   worker_num: 1
   min_alive_workers: 1
-  consumer_name_prefix: "worker_"
-  log_task_done: false
+  consumer_name_prefix: "video_worker_"
+  log_task_done: true
   heartbeat_enabled: true
   heartbeat_interval_ms: 3000
   heartbeat_ttl_seconds: 15
@@ -59,7 +68,7 @@ metrics:
 
 logging:
   enabled: true
-  log_dir: "./runtime/logs/detect/worker"
+  log_dir: "./logs/video_server"
   level: "info"
   console: true
   file: true

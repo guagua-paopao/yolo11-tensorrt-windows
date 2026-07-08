@@ -99,7 +99,7 @@ namespace yolo11_server {
 
         std::string phaseNameForModelType(const std::string& model_type) {
             (void)model_type;
-            return "phase12_0_detect_obb_dual_parallel";
+            return "phase13_5_video_stability_cancel_recovery";
         }
 
         crow::response makeJsonResponse(int code, const nlohmann::json& body) {
@@ -115,6 +115,10 @@ namespace yolo11_server {
         : config_(config), detector_(detector), redis_queue_(config.redis) {
         std::filesystem::create_directories(config_.output.input_dir);
         std::filesystem::create_directories(config_.output.output_dir);
+        if (config_.video.enabled) {
+            std::filesystem::create_directories(config_.video.input_dir);
+            std::filesystem::create_directories(config_.video.output_dir);
+        }
 
         sync_enabled_ = config_.server.enable_sync_detect && detector_ != nullptr;
 
@@ -189,6 +193,36 @@ namespace yolo11_server {
             return handleDetectObbImageAsync(request);
                 });
 
+        CROW_ROUTE(app, "/api/v1/detect/video/async")
+            .methods(crow::HTTPMethod::POST)
+            ([this](const crow::request& request) {
+            return handleDetectVideoAsync(request);
+                });
+
+        CROW_ROUTE(app, "/api/v1/video/result/<string>")
+            .methods(crow::HTTPMethod::GET)
+            ([this](const std::string& task_id) {
+            return handleGetVideoResult(task_id);
+                });
+
+        CROW_ROUTE(app, "/api/v1/video/result/<string>/file")
+            .methods(crow::HTTPMethod::GET)
+            ([this](const std::string& task_id) {
+            return handleGetVideoFile(task_id);
+                });
+
+        CROW_ROUTE(app, "/api/v1/video/result/<string>/cancel")
+            .methods(crow::HTTPMethod::POST)
+            ([this](const std::string& task_id) {
+            return handleCancelVideoTask(task_id);
+                });
+
+        CROW_ROUTE(app, "/api/v1/video/result/<string>/cleanup")
+            .methods(crow::HTTPMethod::POST)
+            ([this](const std::string& task_id) {
+            return handleCleanupVideoTask(task_id);
+                });
+
         CROW_ROUTE(app, "/api/v1/result/<string>")
             .methods(crow::HTTPMethod::GET)
             ([this](const std::string& task_id) {
@@ -227,6 +261,14 @@ namespace yolo11_server {
         body["embedded_worker_enabled"] = config_.worker.enabled;
         body["queue_backend"] = redis_mode_ ? "redis_stream" : "disabled";
         body["image_storage"] = redis_mode_ ? "redis_binary_keys" : "local_file_only";
+        body["video_enabled"] = config_.video.enabled;
+        if (config_.video.enabled) {
+            body["video_storage"] = "local_files";
+            body["video_input_dir"] = config_.video.input_dir;
+            body["video_output_dir"] = config_.video.output_dir;
+            body["video_max_video_bytes"] = config_.video.max_video_bytes;
+            body["video_progress_update_interval_frames"] = config_.video.progress_update_interval_frames;
+        }
         body["server_health"] = "ok";
 
         if (redis_mode_) {
@@ -553,7 +595,7 @@ namespace yolo11_server {
         nlohmann::json body;
         body["success"] = true;
         body["service"] = "yolo11_server";
-        body["phase"] = "phase12_0_detect_obb_dual_parallel";
+        body["phase"] = phaseNameForModelType(config_.model.type);
         body["configured_model_type"] = configured_model_type;
         body["model_filter"] = model_filter.empty() ? nlohmann::json(nullptr) : nlohmann::json(model_filter);
         body["models"] = nlohmann::json::object();
@@ -758,6 +800,14 @@ namespace yolo11_server {
             return makeJsonResponse(503, body);
         }
 
+        if (config_.video.enabled) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "IMAGE_ASYNC_DISABLED_FOR_VIDEO_SERVER";
+            body["error"] = "this server process is configured for video async tasks. Use /api/v1/detect/video/async.";
+            return makeJsonResponse(503, body);
+        }
+
         if (!redis_mode_) {
             nlohmann::json body;
             body["success"] = false;
@@ -935,6 +985,453 @@ namespace yolo11_server {
         return makeJsonResponse(202, body);
     }
 
+    crow::response HttpController::handleDetectVideoAsync(const crow::request& request) {
+        if (!config_.video.enabled) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "VIDEO_ASYNC_DISABLED";
+            body["error"] = "video async endpoint is disabled in this server config.";
+            return makeJsonResponse(503, body);
+        }
+        if (toLowerString(config_.model.type) != "detect") {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "VIDEO_DETECT_ONLY";
+            body["error"] = "Phase 13.0 only supports detect video tasks. Set model.type=detect.";
+            body["configured_model_type"] = config_.model.type;
+            return makeJsonResponse(503, body);
+        }
+        if (!redis_mode_) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_DISABLED";
+            body["error"] = "video async inference requires redis.enabled=true";
+            return makeJsonResponse(503, body);
+        }
+
+        if (config_.worker.heartbeat_enabled && config_.worker.min_alive_workers > 0) {
+            std::vector<WorkerHeartbeatRecord> workers;
+            std::string workers_error;
+            if (!redis_queue_.getWorkerHeartbeats(
+                config_.worker.consumer_name_prefix,
+                config_.worker.worker_num,
+                workers,
+                workers_error)) {
+                nlohmann::json body;
+                body["success"] = false;
+                body["error_code"] = "WORKER_HEARTBEAT_QUERY_FAILED";
+                body["error"] = "failed to query video worker heartbeat before submitting video task";
+                body["workers_error"] = workers_error;
+                body["ready"] = false;
+                return makeJsonResponse(503, body);
+            }
+
+            int alive_workers = 0;
+            nlohmann::json worker_array = nlohmann::json::array();
+            for (const auto& worker : workers) {
+                if (worker.alive) {
+                    ++alive_workers;
+                }
+                worker_array.push_back(workerHeartbeatToJson(worker));
+            }
+            if (alive_workers < config_.worker.min_alive_workers) {
+                nlohmann::json body;
+                body["success"] = false;
+                body["error_code"] = "NOT_ENOUGH_ALIVE_VIDEO_WORKERS";
+                body["error"] = "video task rejected because not enough alive video workers";
+                body["ready"] = false;
+                body["alive_workers"] = alive_workers;
+                body["expected_workers"] = config_.worker.worker_num;
+                body["min_alive_workers"] = config_.worker.min_alive_workers;
+                body["workers"] = worker_array;
+                return makeJsonResponse(503, body);
+            }
+        }
+
+        std::string memory_error;
+        nlohmann::json memory_json;
+        if (redisMemoryOverLimit(&memory_json, memory_error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_MEMORY_OVER_LIMIT";
+            body["error"] = memory_error;
+            body["redis_memory"] = memory_json;
+            return makeJsonResponse(503, body);
+        }
+
+        std::string error_message;
+        if (!validateBodySize(request, error_message)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REQUEST_TOO_LARGE";
+            body["error"] = error_message;
+            return makeJsonResponse(413, body);
+        }
+
+        std::string video_bytes = extractVideoBytes(request, error_message);
+        if (video_bytes.empty()) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "EMPTY_VIDEO_BODY";
+            body["error"] = error_message.empty() ? "empty video body" : error_message;
+            return makeJsonResponse(400, body);
+        }
+        if (!validateVideoSize(video_bytes.size(), error_message)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "VIDEO_TOO_LARGE";
+            body["error"] = error_message;
+            return makeJsonResponse(413, body);
+        }
+
+        const std::string task_id = "video_detect_" + makeTaskId();
+        const std::string input_path = makeInputVideoPath(task_id);
+        const std::string output_filename = makeOutputVideoFilename(task_id);
+        const std::string output_path = makeOutputVideoPath(output_filename);
+
+        try {
+            std::filesystem::create_directories(config_.video.input_dir);
+            std::filesystem::create_directories(config_.video.output_dir);
+            std::ofstream out(input_path, std::ios::binary);
+            out.write(video_bytes.data(), static_cast<std::streamsize>(video_bytes.size()));
+            out.close();
+            if (!out) {
+                throw std::runtime_error("failed to write uploaded video file");
+            }
+        }
+        catch (const std::exception& e) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "VIDEO_SAVE_FAILED";
+            body["error"] = e.what();
+            return makeJsonResponse(500, body);
+        }
+
+        cv::VideoCapture cap(input_path);
+        if (!cap.isOpened()) {
+            std::filesystem::remove(input_path);
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "VIDEO_OPEN_FAILED";
+            body["error"] = "failed to open uploaded video. Please upload a valid mp4/avi video file.";
+            return makeJsonResponse(400, body);
+        }
+        const int width = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
+        const int height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
+        double fps = cap.get(cv::CAP_PROP_FPS);
+        long long total_frames = static_cast<long long>(cap.get(cv::CAP_PROP_FRAME_COUNT));
+        cap.release();
+        if (width <= 0 || height <= 0) {
+            std::filesystem::remove(input_path);
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "VIDEO_INVALID_META";
+            body["error"] = "invalid video width/height";
+            return makeJsonResponse(400, body);
+        }
+        if (fps <= 0.0 || fps > 240.0) {
+            fps = config_.video.fallback_fps;
+        }
+        if (total_frames < 0) {
+            total_frames = 0;
+        }
+
+        RedisTask task;
+        task.task_id = task_id;
+        task.task_kind = "video";
+        task.model_type = "detect";
+        task.input_video_path = input_path;
+        task.output_video_path = output_path;
+        task.output_video_filename = output_filename;
+        task.video_width = width;
+        task.video_height = height;
+        task.video_fps = fps;
+        task.video_total_frames = total_frames;
+        task.video_duration_ms = (total_frames > 0 && fps > 0.0) ? static_cast<long long>((static_cast<double>(total_frames) / fps) * 1000.0) : 0LL;
+        task.create_time_ms = nowMs();
+
+        std::string redis_error;
+        if (!redis_queue_.submitTask(task, redis_error)) {
+            std::filesystem::remove(input_path);
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_SUBMIT_VIDEO_FAILED";
+            body["error"] = "failed to submit video task to Redis";
+            body["redis_error"] = redis_error;
+            return makeJsonResponse(500, body);
+        }
+
+        nlohmann::json body;
+        body["success"] = true;
+        body["task_id"] = task_id;
+        body["task_kind"] = "video";
+        body["model_type"] = "detect";
+        body["status"] = "queued";
+        body["queue_backend"] = "redis_stream";
+        body["video_storage"] = "local_files";
+        body["input_video_path"] = input_path;
+        body["output_video_path"] = output_path;
+        body["result_url"] = "/api/v1/video/result/" + task_id;
+        body["result_video_url"] = "/api/v1/video/result/" + task_id + "/file";
+        body["video"] = {
+            {"width", width},
+            {"height", height},
+            {"fps", fps},
+            {"total_frames", total_frames}
+        };
+
+        spdlog::info("Video async task submitted: task_id={}, bytes={}, input={}, output={}",
+            task_id, video_bytes.size(), input_path, output_path);
+        return makeJsonResponse(202, body);
+    }
+
+    crow::response HttpController::handleGetVideoResult(const std::string& task_id) const {
+        if (!redis_mode_) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_DISABLED";
+            body["error"] = "video result query requires redis.enabled=true";
+            body["task_id"] = task_id;
+            return makeJsonResponse(503, body);
+        }
+
+        RedisTaskStatus task_status;
+        std::string redis_error;
+        if (!redis_queue_.getTaskStatus(task_id, task_status, redis_error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_QUERY_FAILED";
+            body["error"] = "failed to query Redis video task status";
+            body["redis_error"] = redis_error;
+            body["task_id"] = task_id;
+            return makeJsonResponse(500, body);
+        }
+        if (!task_status.found) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "TASK_NOT_FOUND";
+            body["error"] = "video task not found or expired";
+            body["task_id"] = task_id;
+            return makeJsonResponse(404, body);
+        }
+        if ((task_status.status == "done" || task_status.status == "canceled") && !task_status.result_json_text.empty()) {
+            crow::response response(200, task_status.result_json_text);
+            response.set_header("Content-Type", "application/json; charset=utf-8");
+            return response;
+        }
+
+        nlohmann::json body;
+        body["success"] = task_status.status != "failed";
+        body["task_id"] = task_status.task_id;
+        body["task_kind"] = task_status.task_kind.empty() ? "video" : task_status.task_kind;
+        body["model_type"] = task_status.model_type.empty() ? "detect" : task_status.model_type;
+        body["status"] = task_status.status;
+        body["queue_backend"] = "redis_stream";
+        body["video_storage"] = "local_files";
+        body["create_time_ms"] = task_status.create_time_ms;
+        body["start_time_ms"] = task_status.start_time_ms;
+        body["finish_time_ms"] = task_status.finish_time_ms;
+        body["queue_wait_ms"] = task_status.queue_wait_ms;
+        body["process_ms"] = task_status.process_ms;
+        body["total_ms"] = task_status.total_ms;
+        body["cancel_requested"] = task_status.cancel_requested;
+        body["video"] = {
+            {"width", task_status.video_width},
+            {"height", task_status.video_height},
+            {"fps", task_status.fps},
+            {"total_frames", task_status.total_frames},
+            {"total_frames_estimated", task_status.total_frames},
+            {"processed_frames", task_status.processed_frames},
+            {"current_frame_index", task_status.current_frame_index},
+            {"progress", task_status.progress},
+            {"duration_ms", task_status.duration_ms},
+            {"completed_by_eof", task_status.status == "done"}
+        };
+        if (!task_status.input_video_path.empty()) {
+            body["input_video_path"] = task_status.input_video_path;
+        }
+        if (!task_status.output_video_path.empty()) {
+            body["output_video_path"] = task_status.output_video_path;
+            body["result_video_url"] = "/api/v1/video/result/" + task_id + "/file";
+        }
+        if (!task_status.worker_id.empty()) {
+            body["worker_id"] = task_status.worker_id;
+        }
+        if (!task_status.consumer_name.empty()) {
+            body["consumer_name"] = task_status.consumer_name;
+        }
+        if (task_status.task_kind == "video") {
+            body["video"] = {
+                {"width", task_status.video_width},
+                {"height", task_status.video_height},
+                {"fps", task_status.fps},
+                {"total_frames", task_status.total_frames},
+                {"total_frames_estimated", task_status.total_frames},
+                {"processed_frames", task_status.processed_frames},
+                {"current_frame_index", task_status.current_frame_index},
+                {"progress", task_status.progress},
+                {"duration_ms", task_status.duration_ms},
+                {"completed_by_eof", task_status.status == "done"}
+            };
+            body["cancel_requested"] = task_status.cancel_requested;
+            if (!task_status.output_video_path.empty()) {
+                body["output_video_path"] = task_status.output_video_path;
+                body["result_video_url"] = "/api/v1/video/result/" + task_id + "/file";
+            }
+            if (!task_status.input_video_path.empty()) {
+                body["input_video_path"] = task_status.input_video_path;
+            }
+        }
+
+        if (!task_status.error.empty()) {
+            body["error"] = task_status.error;
+        }
+        return makeJsonResponse(200, body);
+    }
+
+    crow::response HttpController::handleGetVideoFile(const std::string& task_id) const {
+        if (!redis_mode_) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_DISABLED";
+            body["error"] = "video file query requires redis.enabled=true";
+            body["task_id"] = task_id;
+            return makeJsonResponse(503, body);
+        }
+
+        RedisTaskStatus task_status;
+        std::string redis_error;
+        if (!redis_queue_.getTaskStatus(task_id, task_status, redis_error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_QUERY_FAILED";
+            body["error"] = redis_error;
+            body["task_id"] = task_id;
+            return makeJsonResponse(500, body);
+        }
+        if (!task_status.found || task_status.output_video_path.empty()) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "VIDEO_RESULT_NOT_FOUND";
+            body["error"] = "video result not found, not completed, or expired";
+            body["task_id"] = task_id;
+            return makeJsonResponse(404, body);
+        }
+
+        std::string bytes;
+        if (!readWholeFileBinaryToString(task_status.output_video_path, bytes) || bytes.empty()) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "VIDEO_FILE_NOT_FOUND";
+            body["error"] = "local output video file not found";
+            body["task_id"] = task_id;
+            body["output_video_path"] = task_status.output_video_path;
+            return makeJsonResponse(404, body);
+        }
+
+        crow::response response;
+        response.code = 200;
+        response.body = std::move(bytes);
+        response.set_header("Content-Type", "video/mp4");
+        response.set_header("Cache-Control", "no-store");
+        return response;
+    }
+
+    crow::response HttpController::handleCancelVideoTask(const std::string& task_id) const {
+        if (!redis_mode_) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_DISABLED";
+            body["error"] = "cancel requires redis.enabled=true";
+            return makeJsonResponse(503, body);
+        }
+        RedisTaskStatus task_status;
+        std::string redis_error;
+        if (!redis_queue_.getTaskStatus(task_id, task_status, redis_error) || !task_status.found) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "TASK_NOT_FOUND";
+            body["error"] = "task not found or expired";
+            body["task_id"] = task_id;
+            return makeJsonResponse(404, body);
+        }
+        if (task_status.status == "done" || task_status.status == "failed" || task_status.status == "canceled") {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "TASK_ALREADY_FINISHED";
+            body["error"] = "task is already finished";
+            body["task_id"] = task_id;
+            body["status"] = task_status.status;
+            return makeJsonResponse(409, body);
+        }
+        if (!redis_queue_.requestCancelTask(task_id, redis_error)) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "CANCEL_REQUEST_FAILED";
+            body["error"] = redis_error;
+            body["task_id"] = task_id;
+            return makeJsonResponse(500, body);
+        }
+        nlohmann::json body;
+        body["success"] = true;
+        body["task_id"] = task_id;
+        body["status"] = task_status.status;
+        body["cancel_requested"] = true;
+        body["result_url"] = "/api/v1/video/result/" + task_id;
+        return makeJsonResponse(200, body);
+    }
+
+    crow::response HttpController::handleCleanupVideoTask(const std::string& task_id) const {
+        if (!redis_mode_) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "REDIS_DISABLED";
+            body["error"] = "cleanup requires redis.enabled=true";
+            return makeJsonResponse(503, body);
+        }
+
+        RedisTaskStatus task_status;
+        std::string redis_error;
+        if (!redis_queue_.getTaskStatus(task_id, task_status, redis_error) || !task_status.found) {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "TASK_NOT_FOUND";
+            body["error"] = "task not found or expired";
+            body["task_id"] = task_id;
+            return makeJsonResponse(404, body);
+        }
+        if (task_status.status == "queued" || task_status.status == "running") {
+            nlohmann::json body;
+            body["success"] = false;
+            body["error_code"] = "TASK_NOT_FINISHED";
+            body["error"] = "video task is not finished; cancel it first or wait until it finishes";
+            body["task_id"] = task_id;
+            body["status"] = task_status.status;
+            return makeJsonResponse(409, body);
+        }
+
+        bool input_removed = false;
+        bool output_removed = false;
+        std::error_code ec;
+        if (!task_status.input_video_path.empty() && std::filesystem::exists(task_status.input_video_path, ec)) {
+            input_removed = std::filesystem::remove(task_status.input_video_path, ec);
+        }
+        ec.clear();
+        if (!task_status.output_video_path.empty() && std::filesystem::exists(task_status.output_video_path, ec)) {
+            output_removed = std::filesystem::remove(task_status.output_video_path, ec);
+        }
+
+        nlohmann::json body;
+        body["success"] = true;
+        body["task_id"] = task_id;
+        body["status"] = task_status.status;
+        body["input_video_removed"] = input_removed;
+        body["output_video_removed"] = output_removed;
+        body["input_video_path"] = task_status.input_video_path;
+        body["output_video_path"] = task_status.output_video_path;
+        return makeJsonResponse(200, body);
+    }
+
     crow::response HttpController::handleGetAsyncResult(const std::string& task_id) const {
         if (!redis_mode_) {
             nlohmann::json body;
@@ -976,9 +1473,10 @@ namespace yolo11_server {
         body["success"] = task_status.status != "failed";
         body["task_id"] = task_status.task_id;
         body["status"] = task_status.status;
+        body["task_kind"] = task_status.task_kind.empty() ? "image" : task_status.task_kind;
         body["model_type"] = task_status.model_type.empty() ? config_.model.type : task_status.model_type;
         body["queue_backend"] = "redis_stream";
-        body["image_storage"] = "redis_binary_keys";
+        body["image_storage"] = task_status.task_kind == "video" ? "local_files" : "redis_binary_keys";
         body["create_time_ms"] = task_status.create_time_ms;
         body["start_time_ms"] = task_status.start_time_ms;
         body["finish_time_ms"] = task_status.finish_time_ms;
@@ -1117,6 +1615,33 @@ namespace yolo11_server {
         return {};
     }
 
+    std::string HttpController::extractVideoBytes(const crow::request& request, std::string& error_message) const {
+        const std::string content_type = request.get_header_value("Content-Type");
+
+        if (content_type.find("multipart/form-data") != std::string::npos) {
+            try {
+                crow::multipart::message multipart_message(request);
+                auto part = multipart_message.get_part_by_name("file");
+                if (part.body.empty()) {
+                    error_message = "multipart field 'file' is empty or not found";
+                    return {};
+                }
+                return part.body;
+            }
+            catch (const std::exception& e) {
+                error_message = std::string("failed to parse multipart/form-data: ") + e.what();
+                return {};
+            }
+        }
+
+        if (!request.body.empty()) {
+            return request.body;
+        }
+
+        error_message = "request body is empty. Use multipart field name 'file' or raw video bytes.";
+        return {};
+    }
+
     bool HttpController::validateRedisImageSize(size_t bytes, const std::string& field_name, std::string& error_message) const {
         if (config_.redis.max_image_bytes <= 0) {
             return true;
@@ -1124,6 +1649,18 @@ namespace yolo11_server {
         if (static_cast<long long>(bytes) > config_.redis.max_image_bytes) {
             error_message = field_name + " too large. bytes=" + std::to_string(bytes) +
                 ", max_image_bytes=" + std::to_string(config_.redis.max_image_bytes);
+            return false;
+        }
+        return true;
+    }
+
+    bool HttpController::validateVideoSize(size_t bytes, std::string& error_message) const {
+        if (config_.video.max_video_bytes <= 0) {
+            return true;
+        }
+        if (static_cast<long long>(bytes) > config_.video.max_video_bytes) {
+            error_message = "video too large. bytes=" + std::to_string(bytes) +
+                ", max_video_bytes=" + std::to_string(config_.video.max_video_bytes);
             return false;
         }
         return true;
@@ -1195,6 +1732,20 @@ namespace yolo11_server {
         return (input_dir / (task_id + ".jpg")).string();
     }
 
+    std::string HttpController::makeInputVideoPath(const std::string& task_id) const {
+        std::filesystem::path input_dir(config_.video.input_dir);
+        return (input_dir / (task_id + ".mp4")).string();
+    }
+
+    std::string HttpController::makeOutputVideoFilename(const std::string& task_id) const {
+        return task_id + "_result" + config_.video.output_extension;
+    }
+
+    std::string HttpController::makeOutputVideoPath(const std::string& filename) const {
+        std::filesystem::path output_dir(config_.video.output_dir);
+        return (output_dir / filename).string();
+    }
+
     std::string HttpController::makeResultImagePath(const std::string& filename) const {
         std::filesystem::path output_dir(config_.output.output_dir);
         std::filesystem::path image_path = output_dir / filename;
@@ -1225,6 +1776,11 @@ namespace yolo11_server {
             return "image/png";
         }
         return "image/jpeg";
+    }
+
+    bool HttpController::readWholeFileBinaryToString(const std::string& path, std::string& bytes) {
+        bytes = readWholeFileBinary(path);
+        return !bytes.empty();
     }
 
     long long HttpController::nowMs() {
