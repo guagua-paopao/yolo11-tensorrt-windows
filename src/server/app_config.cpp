@@ -225,6 +225,90 @@ namespace yolo11_server {
             config.worker.heartbeat_ttl_seconds = 3;
         }
 
+
+        // Phase 10.5: optional multi-model profile registry.
+        // Example:
+        // active_model: "obb"
+        // models:
+        //   obb:
+        //     type: "obb"
+        //     engine_path: "..."
+        //     labels_path: "..."
+        //     stream_key: "yolo:stream:obb"
+        //     consumer_group: "yolo11_obb_group"
+        //     consumer_name_prefix: "obb_worker_"
+        auto models = root["models"];
+        if (models && models.IsMap()) {
+            for (const auto& entry : models) {
+                const std::string name = entry.first.as<std::string>();
+                const YAML::Node node = entry.second;
+                ModelProfile profile;
+                profile.name = name;
+                profile.type = readOrDefault<std::string>(node, "type", name);
+                profile.engine_path = readOrDefault<std::string>(node, "engine_path", config.model.engine_path);
+                profile.labels_path = readOrDefault<std::string>(node, "labels_path", config.model.labels_path);
+                profile.gpu_id = readOrDefault<int>(node, "gpu_id", config.model.gpu_id);
+                profile.use_gpu_postprocess = readOrDefault<bool>(node, "use_gpu_postprocess", config.model.use_gpu_postprocess);
+                profile.stream_key = readOrDefault<std::string>(node, "stream_key", config.redis.stream_key);
+                profile.consumer_group = readOrDefault<std::string>(node, "consumer_group", config.redis.consumer_group);
+                profile.consumer_name_prefix = readOrDefault<std::string>(node, "consumer_name_prefix", config.worker.consumer_name_prefix);
+                profile.worker_num = readOrDefault<int>(node, "worker_num", config.worker.worker_num);
+                profile.min_alive_workers = readOrDefault<int>(node, "min_alive_workers", config.worker.min_alive_workers);
+                config.model_profiles[name] = profile;
+            }
+        }
+
+        config.active_model = readOrDefault<std::string>(root, "active_model", config.active_model);
+        if (!config.active_model.empty()) {
+            const auto it = config.model_profiles.find(config.active_model);
+            if (it == config.model_profiles.end()) {
+                std::cerr << "active_model='" << config.active_model
+                          << "' is not found in models. Use legacy model/redis/worker sections." << std::endl;
+            }
+            else {
+                const ModelProfile& profile = it->second;
+                config.model.type = profile.type;
+                config.model.engine_path = profile.engine_path;
+                config.model.labels_path = profile.labels_path;
+                config.model.gpu_id = profile.gpu_id;
+                config.model.use_gpu_postprocess = profile.use_gpu_postprocess;
+                config.redis.stream_key = profile.stream_key;
+                config.redis.consumer_group = profile.consumer_group;
+                config.worker.consumer_name_prefix = profile.consumer_name_prefix;
+                config.worker.worker_num = profile.worker_num;
+                config.worker.min_alive_workers = profile.min_alive_workers;
+
+                // Keep consumer_name only as a default. yolo11_worker.exe normally overrides it by
+                // --consumer-name. For convenience, derive one when the YAML did not set it clearly.
+                if (config.redis.consumer_name.empty() || config.redis.consumer_name == "worker_1") {
+                    config.redis.consumer_name = config.worker.consumer_name_prefix + "1";
+                }
+            }
+        }
+
+        // Re-validate fields that may have been overridden by an active model profile.
+        if (config.worker.worker_num <= 0) {
+            config.worker.worker_num = 1;
+        }
+        if (config.worker.worker_num > 16) {
+            std::cerr << "worker.worker_num is too large, clamp to 16." << std::endl;
+            config.worker.worker_num = 16;
+        }
+        if (config.worker.min_alive_workers <= 0) {
+            config.worker.min_alive_workers = 1;
+        }
+        if (config.worker.min_alive_workers > config.worker.worker_num) {
+            config.worker.min_alive_workers = config.worker.worker_num;
+        }
+        if (config.worker.consumer_name_prefix.empty()) {
+            config.worker.consumer_name_prefix = "worker_";
+        }
+        if (config.redis.stream_key.empty()) {
+            config.redis.stream_key = config.model.type == "obb" ? "yolo:stream:obb" : "yolo:stream:detect";
+        }
+        if (config.redis.consumer_group.empty()) {
+            config.redis.consumer_group = config.model.type == "obb" ? "yolo11_obb_group" : "yolo11_group";
+        }
         return config;
     }
 

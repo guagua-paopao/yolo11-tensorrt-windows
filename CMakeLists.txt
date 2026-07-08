@@ -352,6 +352,7 @@ add_executable(yolo11_server
     ${PROJECT_SOURCE_DIR}/src/server/image_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/server/label_map.cpp
     ${PROJECT_SOURCE_DIR}/src/server/result_serializer.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/model_runner.cpp
     ${PROJECT_SOURCE_DIR}/src/server/redis_task_queue.cpp
     ${PROJECT_SOURCE_DIR}/src/server/inference_worker.cpp
     ${PROJECT_SOURCE_DIR}/src/server/inference_service.cpp
@@ -401,6 +402,7 @@ add_executable(yolo11_worker
     ${PROJECT_SOURCE_DIR}/src/server/image_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/server/label_map.cpp
     ${PROJECT_SOURCE_DIR}/src/server/result_serializer.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/model_runner.cpp
     ${PROJECT_SOURCE_DIR}/src/server/redis_task_queue.cpp
     ${PROJECT_SOURCE_DIR}/src/server/inference_worker.cpp
     ${PROJECT_SOURCE_DIR}/src/server/inference_service.cpp

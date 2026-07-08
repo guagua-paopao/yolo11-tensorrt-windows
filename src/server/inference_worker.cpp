@@ -40,7 +40,7 @@ namespace yolo11_server {
         std::string toLowerString(std::string text) {
             std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
                 return static_cast<char>(std::tolower(ch));
-                });
+            });
             return text;
         }
 
@@ -101,11 +101,11 @@ namespace yolo11_server {
         spdlog::info("Worker {} loading TensorRT engine: {}, model_type={}, consumer={}",
             worker_id_, config_.model.engine_path, config_.model.type, config_.redis.consumer_name);
 
-        if (!initDetectorByModelType()) {
-            spdlog::error("Worker {} failed to initialize detector for model.type={}", worker_id_, config_.model.type);
+        if (!initModelRunner()) {
+            spdlog::error("Worker {} failed to initialize model runner for model.type={}", worker_id_, config_.model.type);
             return false;
         }
-        detector_initialized_ = true;
+        runner_initialized_ = true;
 
         std::string label_error;
         if (!label_map_.loadFromFile(config_.model.labels_path, label_error)) {
@@ -165,28 +165,24 @@ namespace yolo11_server {
     }
 
     void InferenceWorker::releaseDetectorNoexcept() noexcept {
-        if (!detector_initialized_) {
+        if (!runner_initialized_) {
             return;
         }
 
         try {
-            if (detector_) {
-                detector_->release();
-                detector_.reset();
+            if (runner_) {
+                runner_->release();
+                runner_.reset();
             }
-            if (obb_detector_) {
-                obb_detector_->release();
-                obb_detector_.reset();
-            }
-            detector_initialized_ = false;
+            runner_initialized_ = false;
         }
         catch (const std::exception& e) {
-            spdlog::error("Detector release exception: " + std::string(e.what()));
-            detector_initialized_ = false;
+            spdlog::error("ModelRunner release exception: " + std::string(e.what()));
+            runner_initialized_ = false;
         }
         catch (...) {
-            spdlog::error("Detector release unknown exception.");
-            detector_initialized_ = false;
+            spdlog::error("ModelRunner release unknown exception.");
+            runner_initialized_ = false;
         }
     }
 
@@ -194,58 +190,24 @@ namespace yolo11_server {
         return toLowerString(config_.model.type) == "obb";
     }
 
-    bool InferenceWorker::initDetectorByModelType() {
-        const std::string model_type = toLowerString(config_.model.type);
-        if (model_type == "detect") {
-            yolo11::DetectorConfig detector_config;
-            detector_config.engine_path = config_.model.engine_path;
-            detector_config.gpu_id = config_.model.gpu_id;
-            detector_config.use_gpu_postprocess = config_.model.use_gpu_postprocess;
-
-            detector_ = std::make_unique<yolo11::Yolo11Detector>();
-            return detector_->init(detector_config);
+    bool InferenceWorker::initModelRunner() {
+        runner_ = createModelRunner(config_.model.type);
+        if (!runner_) {
+            spdlog::error("Unsupported worker model.type={}. Supported values: detect, obb", config_.model.type);
+            return false;
         }
 
-        if (model_type == "obb") {
-            yolo11::ObbConfig obb_config;
-            obb_config.engine_path = config_.model.engine_path;
-            obb_config.gpu_id = config_.model.gpu_id;
-            obb_config.use_gpu_postprocess = config_.model.use_gpu_postprocess;
-
-            obb_detector_ = std::make_unique<yolo11::Yolo11ObbDetector>();
-            return obb_detector_->init(obb_config);
+        std::string error;
+        if (!runner_->init(config_, error)) {
+            spdlog::error("ModelRunner init failed: model_type={}, engine_path={}, error={}",
+                config_.model.type, config_.model.engine_path, error);
+            runner_.reset();
+            return false;
         }
 
-        spdlog::error("Unsupported worker model.type={}. Supported values: detect, obb", config_.model.type);
-        return false;
-    }
-
-    std::vector<Detection> InferenceWorker::inferByModelType(const cv::Mat& image) {
-        if (isObbModel()) {
-            if (!obb_detector_) {
-                throw std::runtime_error("OBB detector is not initialized");
-            }
-            return obb_detector_->infer(image);
-        }
-
-        if (!detector_) {
-            throw std::runtime_error("Detection detector is not initialized");
-        }
-        return detector_->infer(image);
-    }
-
-    cv::Mat InferenceWorker::drawByModelType(const cv::Mat& image, const std::vector<Detection>& detections) {
-        if (isObbModel()) {
-            if (!obb_detector_) {
-                throw std::runtime_error("OBB detector is not initialized");
-            }
-            return obb_detector_->draw(image, detections);
-        }
-
-        if (!detector_) {
-            throw std::runtime_error("Detection detector is not initialized");
-        }
-        return detector_->draw(image, detections);
+        spdlog::info("ModelRunner initialized: model_type={}, engine_path={}",
+            runner_->modelType(), config_.model.engine_path);
+        return true;
     }
 
     bool InferenceWorker::running() const {
@@ -337,9 +299,12 @@ namespace yolo11_server {
             cv::Mat result_image;
             auto t0 = std::chrono::steady_clock::now();
 
-            detections = inferByModelType(image);
+            if (!runner_) {
+                throw std::runtime_error("model runner is not initialized");
+            }
+            detections = runner_->infer(image);
             if (config_.output.save_result_image) {
-                result_image = drawByModelType(image, detections);
+                result_image = runner_->draw(image, detections);
             }
 
             auto t1 = std::chrono::steady_clock::now();
