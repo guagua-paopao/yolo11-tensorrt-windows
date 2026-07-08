@@ -51,8 +51,8 @@ int main(int argc, char** argv) {
         }
         spdlog::info("Config path: {}", config_path);
 
-        if (app_config.model.type != "detect" && app_config.model.type != "obb") {
-            spdlog::error("Current server supports model.type=detect or model.type=obb. Current model.type={}", app_config.model.type);
+        if (app_config.model.type != "detect" && app_config.model.type != "obb" && app_config.model.type != "cls" && app_config.model.type != "pose") {
+            spdlog::error("Current server supports model.type=detect, model.type=obb, model.type=cls or model.type=pose. Current model.type={}", app_config.model.type);
             exit_code = -1;
         }
         else {
@@ -112,6 +112,7 @@ int main(int argc, char** argv) {
                     spdlog::info("Metrics API: http://{}:{}/api/v1/metrics", app_config.server.host, app_config.server.port);
                     spdlog::info("Detect Async API: POST http://{}:{}/api/v1/detect/image/async", app_config.server.host, app_config.server.port);
                     spdlog::info("OBB Async API: POST http://{}:{}/api/v1/detect/obb/async", app_config.server.host, app_config.server.port);
+                    spdlog::info("CLS Async API: POST http://{}:{}/api/v1/classify/image/async", app_config.server.host, app_config.server.port);
 
                     app.bindaddr(app_config.server.host)
                         .port(static_cast<uint16_t>(app_config.server.port))

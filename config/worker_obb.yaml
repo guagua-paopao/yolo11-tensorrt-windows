@@ -9,8 +9,8 @@ server:
 
 model:
   type: "obb"
-  engine_path: "D:/tensorrtx/yolo11/engines/yolo11n-obb.engine"
-  labels_path: "D:/tensorrtx/yolo11/labels/dota.txt"
+  engine_path: "./engines/yolo11n-obb.engine"
+  labels_path: "./labels/dota.txt"
   gpu_id: 0
   use_gpu_postprocess: false
 
@@ -48,6 +48,12 @@ worker:
   min_alive_workers: 1
   consumer_name_prefix: "obb_worker_"
   log_task_done: true
+  # Phase 15: descriptive capability/resource declaration.
+  worker_group: "image_obb_gpu0"
+  worker_kind: "image"
+  task_kind: "image_async"
+  stream_type: "redis_stream"
+  max_concurrency: 1
   heartbeat_enabled: true
   heartbeat_interval_ms: 3000
   heartbeat_ttl_seconds: 15

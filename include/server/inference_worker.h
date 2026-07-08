@@ -36,6 +36,8 @@ namespace yolo11_server {
         void releaseDetectorNoexcept() noexcept;
         bool initModelRunner();
         bool isObbModel() const;
+        bool isClsModel() const;
+        bool isPoseModel() const;
 
         void heartbeatLoop() noexcept;
         void writeHeartbeatNoexcept() noexcept;

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <string>
 
 #include "config.h"
@@ -146,6 +147,77 @@ namespace yolo11_server {
 
             geometry.bbox_axis_aligned = cv::Rect(min_x, min_y, std::max(0, max_x - min_x), std::max(0, max_y - min_y));
             return geometry;
+        }
+
+
+        const std::vector<std::string>& cocoKeypointNames() {
+            static const std::vector<std::string> names = {
+                "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+                "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+                "left_wrist", "right_wrist", "left_hip", "right_hip",
+                "left_knee", "right_knee", "left_ankle", "right_ankle"
+            };
+            return names;
+        }
+
+        const std::vector<std::pair<int, int>>& cocoSkeletonPairs() {
+            static const std::vector<std::pair<int, int>> pairs = {
+                {0, 1}, {0, 2},  {0, 5}, {0, 6},  {1, 2},   {1, 3},   {2, 4},
+                {5, 6}, {5, 7},  {5, 11}, {6, 8}, {6, 12}, {7, 9},   {8, 10},
+                {11, 12}, {11, 13}, {12, 14}, {13, 15}, {14, 16}
+            };
+            return pairs;
+        }
+
+        struct PosePointOnImage {
+            double x = 0.0;
+            double y = 0.0;
+            double confidence = 0.0;
+            bool valid = false;
+            bool in_image = false;
+        };
+
+        PosePointOnImage mapPosePointToOriginalImage(const cv::Mat& image, const Detection& detection, int point_index) {
+            PosePointOnImage mapped;
+            if (image.empty() || point_index < 0 || point_index >= kNumberOfPoints) {
+                return mapped;
+            }
+
+            const int base = point_index * 3;
+            const double raw_x = detection.keypoints[base];
+            const double raw_y = detection.keypoints[base + 1];
+            const double score = detection.keypoints[base + 2];
+            mapped.confidence = score;
+            if (raw_x < 0.0 || raw_y < 0.0 || score <= 0.0) {
+                return mapped;
+            }
+
+            const double r_w = kInputW / (image.cols * 1.0);
+            const double r_h = kInputH / (image.rows * 1.0);
+            double x = raw_x;
+            double y = raw_y;
+            if (r_h > r_w) {
+                x = raw_x / r_w;
+                y = (raw_y - (kInputH - r_w * image.rows) / 2.0) / r_w;
+            }
+            else {
+                x = (raw_x - (kInputW - r_h * image.cols) / 2.0) / r_h;
+                y = raw_y / r_h;
+            }
+
+            mapped.in_image = (x >= 0.0 && y >= 0.0 && x < image.cols && y < image.rows);
+            mapped.x = std::max(0.0, std::min(x, static_cast<double>(std::max(0, image.cols - 1))));
+            mapped.y = std::max(0.0, std::min(y, static_cast<double>(std::max(0, image.rows - 1))));
+            mapped.valid = score > kConfThreshKeypoints && mapped.in_image;
+            return mapped;
+        }
+
+        nlohmann::json skeletonToJson() {
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& pair : cocoSkeletonPairs()) {
+                arr.push_back({ {"from", pair.first}, {"to", pair.second} });
+            }
+            return arr;
         }
 
     }  // namespace
@@ -293,6 +365,71 @@ namespace yolo11_server {
         return arr;
     }
 
+
+    nlohmann::json ResultSerializer::poseDetectionToJson(
+        const Detection& detection,
+        const cv::Mat& image,
+        const LabelMap& label_map,
+        bool debug
+    ) {
+        nlohmann::json item = detectionToJson(detection, image, label_map, debug);
+        item["pose_format"] = "bbox_keypoints_skeleton";
+        item["keypoint_coordinate_system"] = "original_image_pixels";
+        item["keypoint_format"] = "coco17_xy_conf";
+
+        const auto& names = cocoKeypointNames();
+        nlohmann::json keypoints = nlohmann::json::array();
+        int valid_count = 0;
+        for (int i = 0; i < kNumberOfPoints; ++i) {
+            const PosePointOnImage mapped = mapPosePointToOriginalImage(image, detection, i);
+            if (mapped.valid) {
+                ++valid_count;
+            }
+            nlohmann::json kp;
+            kp["id"] = i;
+            kp["name"] = i < static_cast<int>(names.size()) ? names[static_cast<size_t>(i)] : ("keypoint_" + std::to_string(i));
+            kp["x"] = mapped.x;
+            kp["y"] = mapped.y;
+            kp["confidence"] = mapped.confidence;
+            kp["visible"] = mapped.valid;
+            kp["in_image"] = mapped.in_image;
+            keypoints.push_back(kp);
+        }
+
+        item["num_keypoints"] = kNumberOfPoints;
+        item["valid_keypoints"] = valid_count;
+        item["keypoints"] = keypoints;
+        item["skeleton"] = skeletonToJson();
+
+        if (debug) {
+            nlohmann::json raw = nlohmann::json::array();
+            for (int i = 0; i < kNumberOfPoints; ++i) {
+                const int base = i * 3;
+                raw.push_back({
+                    {"id", i},
+                    {"x", detection.keypoints[base]},
+                    {"y", detection.keypoints[base + 1]},
+                    {"confidence", detection.keypoints[base + 2]}
+                });
+            }
+            item["raw_model_keypoints"] = raw;
+        }
+        return item;
+    }
+
+    nlohmann::json ResultSerializer::poseDetectionsToJson(
+        const std::vector<Detection>& detections,
+        const cv::Mat& image,
+        const LabelMap& label_map,
+        bool debug
+    ) {
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& detection : detections) {
+            arr.push_back(poseDetectionToJson(detection, image, label_map, debug));
+        }
+        return arr;
+    }
+
     nlohmann::json ResultSerializer::detectionsToJsonByModel(
         const std::vector<Detection>& detections,
         const cv::Mat& image,
@@ -304,7 +441,41 @@ namespace yolo11_server {
         if (lower == "obb") {
             return obbDetectionsToJson(detections, image, label_map, debug);
         }
+        if (lower == "pose") {
+            return poseDetectionsToJson(detections, image, label_map, debug);
+        }
         return detectionsToJson(detections, image, label_map, debug);
+    }
+
+
+    nlohmann::json ResultSerializer::classificationsToJson(
+        const std::vector<ClassificationItem>& classifications,
+        const LabelMap& label_map
+    ) {
+        nlohmann::json arr = nlohmann::json::array();
+        int rank = 1;
+        for (const auto& item : classifications) {
+            nlohmann::json cls;
+            cls["rank"] = rank++;
+            cls["class_id"] = item.class_id;
+            cls["class_name"] = item.class_name.empty() ? label_map.className(item.class_id) : item.class_name;
+            cls["confidence"] = item.confidence;
+            arr.push_back(cls);
+        }
+        return arr;
+    }
+
+    nlohmann::json ResultSerializer::outputToJsonByModel(
+        const ModelOutput& output,
+        const cv::Mat& image,
+        const LabelMap& label_map,
+        bool debug
+    ) {
+        const std::string lower = toLowerString(output.model_type);
+        if (lower == "cls") {
+            return classificationsToJson(output.classifications, label_map);
+        }
+        return detectionsToJsonByModel(output.detections, image, label_map, lower, debug);
     }
 
 }  // namespace yolo11_server

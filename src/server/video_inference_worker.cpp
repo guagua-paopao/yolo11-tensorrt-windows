@@ -383,16 +383,16 @@ namespace yolo11_server {
                     return;
                 }
 
-                auto detections = runner_->infer(frame);
-                cv::Mat result = runner_->draw(frame, detections);
+                auto model_output = runner_->infer(frame);
+                cv::Mat result = runner_->draw(frame, model_output);
                 if (result.empty()) {
                     result = frame;
                 }
                 writer.write(result);
 
                 ++processed_frames;
-                total_detections += static_cast<long long>(detections.size());
-                max_objects_per_frame = std::max(max_objects_per_frame, static_cast<long long>(detections.size()));
+                total_detections += static_cast<long long>(model_output.detections.size());
+                max_objects_per_frame = std::max(max_objects_per_frame, static_cast<long long>(model_output.detections.size()));
 
                 if (processed_frames % update_interval == 0) {
                     const long long process_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -587,7 +587,15 @@ namespace yolo11_server {
             heartbeat.host = hostNameString();
             heartbeat.worker_id = worker_id_;
             heartbeat.gpu_id = config_.model.gpu_id;
-            heartbeat.model_type = config_.model.type;
+            heartbeat.model_type = "video";
+            heartbeat.runner_model_type = config_.model.type.empty() ? "detect" : config_.model.type;
+            heartbeat.worker_group = config_.worker.worker_group;
+            heartbeat.worker_kind = config_.worker.worker_kind;
+            heartbeat.task_kind = config_.worker.task_kind;
+            heartbeat.stream_type = config_.worker.stream_type;
+            heartbeat.engine_path = config_.model.engine_path;
+            heartbeat.labels_path = config_.model.labels_path;
+            heartbeat.max_concurrency = config_.worker.max_concurrency;
             heartbeat.processed_count = processed_count_.load();
             heartbeat.failed_count = failed_count_.load();
             heartbeat.start_time_ms = start_time_ms_;

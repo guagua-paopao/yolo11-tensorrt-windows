@@ -126,7 +126,20 @@ namespace yolo11_server {
         std::string host;
         int worker_id = 0;
         int gpu_id = 0;
+
+        // Phase 15 capability fields.
+        // model_type is the public service profile type: detect / obb / video / stream.
+        // runner_model_type records the actual detector runner underneath, such as detect.
         std::string model_type;
+        std::string runner_model_type;
+        std::string worker_group;
+        std::string worker_kind;
+        std::string task_kind;
+        std::string stream_type;
+        std::string engine_path;
+        std::string labels_path;
+        int max_concurrency = 1;
+
         std::string status;
         std::string current_task_id;
         long long processed_count = 0;

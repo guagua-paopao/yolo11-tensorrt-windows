@@ -57,6 +57,14 @@ namespace yolo11_server {
             item["worker_id"] = worker.worker_id;
             item["gpu_id"] = worker.gpu_id;
             item["model_type"] = worker.model_type;
+            item["runner_model_type"] = worker.runner_model_type;
+            item["worker_group"] = worker.worker_group;
+            item["worker_kind"] = worker.worker_kind;
+            item["task_kind"] = worker.task_kind;
+            item["stream_type"] = worker.stream_type;
+            item["engine_path"] = worker.engine_path;
+            item["labels_path"] = worker.labels_path;
+            item["max_concurrency"] = worker.max_concurrency;
             item["status"] = worker.status;
             item["current_task_id"] = worker.current_task_id;
             item["processed_count"] = worker.processed_count;
@@ -82,32 +90,98 @@ namespace yolo11_server {
             return lower == "1" || lower == "true" || lower == "yes" || lower == "on";
         }
 
-        std::string getOptionalModelFilter(const crow::request& request) {
-            const char* raw = request.url_params.get("model");
+        std::string getOptionalStringFilter(const crow::request& request, const char* name) {
+            const char* raw = request.url_params.get(name);
             if (raw == nullptr) {
                 return {};
             }
             return toLowerString(std::string(raw));
         }
 
-        bool workerMatchesModelFilter(const WorkerHeartbeatRecord& worker, const std::string& model_filter) {
-            if (model_filter.empty()) {
-                return true;
+        std::string getOptionalModelFilter(const crow::request& request) {
+            return getOptionalStringFilter(request, "model");
+        }
+
+        std::string profileTypeForConfig(const AppConfig& config) {
+            if (config.stream.enabled) {
+                return "stream";
             }
-            return toLowerString(worker.model_type) == model_filter;
+            if (config.video.enabled) {
+                return "video";
+            }
+            return toLowerString(config.model.type);
+        }
+
+        bool workerMatchesFilters(
+            const WorkerHeartbeatRecord& worker,
+            const std::string& model_filter,
+            const std::string& task_kind_filter,
+            const std::string& worker_group_filter,
+            const std::string& worker_kind_filter,
+            const std::string& stream_type_filter,
+            const std::string& gpu_id_filter
+        ) {
+            if (!model_filter.empty() && toLowerString(worker.model_type) != model_filter) {
+                return false;
+            }
+            if (!task_kind_filter.empty() && toLowerString(worker.task_kind) != task_kind_filter) {
+                return false;
+            }
+            if (!worker_group_filter.empty() && toLowerString(worker.worker_group) != worker_group_filter) {
+                return false;
+            }
+            if (!worker_kind_filter.empty() && toLowerString(worker.worker_kind) != worker_kind_filter) {
+                return false;
+            }
+            if (!stream_type_filter.empty() && toLowerString(worker.stream_type) != stream_type_filter) {
+                return false;
+            }
+            if (!gpu_id_filter.empty() && std::to_string(worker.gpu_id) != gpu_id_filter) {
+                return false;
+            }
+            return true;
+        }
+
+        bool workerMatchesModelFilter(const WorkerHeartbeatRecord& worker, const std::string& model_filter) {
+            return workerMatchesFilters(worker, model_filter, {}, {}, {}, {}, {});
+        }
+
+        nlohmann::json capabilityFiltersToJson(
+            const std::string& model_filter,
+            const std::string& task_kind_filter,
+            const std::string& worker_group_filter,
+            const std::string& worker_kind_filter,
+            const std::string& stream_type_filter,
+            const std::string& gpu_id_filter
+        ) {
+            nlohmann::json filters;
+            filters["model"] = model_filter.empty() ? nlohmann::json(nullptr) : nlohmann::json(model_filter);
+            filters["task_kind"] = task_kind_filter.empty() ? nlohmann::json(nullptr) : nlohmann::json(task_kind_filter);
+            filters["worker_group"] = worker_group_filter.empty() ? nlohmann::json(nullptr) : nlohmann::json(worker_group_filter);
+            filters["worker_kind"] = worker_kind_filter.empty() ? nlohmann::json(nullptr) : nlohmann::json(worker_kind_filter);
+            filters["stream_type"] = stream_type_filter.empty() ? nlohmann::json(nullptr) : nlohmann::json(stream_type_filter);
+            filters["gpu_id"] = gpu_id_filter.empty() ? nlohmann::json(nullptr) : nlohmann::json(gpu_id_filter);
+            return filters;
         }
 
         std::string phaseNameForConfig(const AppConfig& config) {
+            const std::string model_type = toLowerString(config.model.type);
+            if (model_type == "pose") {
+                return "phase17_5_pose_image_async_service";
+            }
+            if (model_type == "cls") {
+                return "phase17_cls_image_async_service";
+            }
             if (config.stream.enabled) {
-                return "phase14_5_stream_stability_reconnect";
+                return "phase15_worker_capability_registry";
             }
             if (config.video.enabled) {
-                return "phase13_5_video_stability_cancel_recovery";
+                return "phase15_worker_capability_registry";
             }
-            if (toLowerString(config.model.type) == "obb") {
-                return "phase12_0_detect_obb_dual_parallel";
+            if (model_type == "obb" || model_type == "detect") {
+                return "phase15_worker_capability_registry";
             }
-            return "phase13_5_video_stability_cancel_recovery";
+            return "phase17_multimodel_output_base";
         }
 
         crow::response makeJsonResponse(int code, const nlohmann::json& body) {
@@ -204,6 +278,18 @@ namespace yolo11_server {
             return handleDetectObbImageAsync(request);
                 });
 
+        CROW_ROUTE(app, "/api/v1/classify/image/async")
+            .methods(crow::HTTPMethod::POST)
+            ([this](const crow::request& request) {
+            return handleClassifyImageAsync(request);
+                });
+
+        CROW_ROUTE(app, "/api/v1/pose/image/async")
+            .methods(crow::HTTPMethod::POST)
+            ([this](const crow::request& request) {
+            return handlePoseImageAsync(request);
+                });
+
         CROW_ROUTE(app, "/api/v1/detect/video/async")
             .methods(crow::HTTPMethod::POST)
             ([this](const crow::request& request) {
@@ -285,6 +371,12 @@ namespace yolo11_server {
         body["phase"] = phaseNameForConfig(config_);
         body["role"] = "http_producer";
         body["model_type"] = config_.model.type;
+        body["profile_type"] = profileTypeForConfig(config_);
+        body["worker_group"] = config_.worker.worker_group;
+        body["worker_kind"] = config_.worker.worker_kind;
+        body["task_kind"] = config_.worker.task_kind;
+        body["stream_type"] = config_.worker.stream_type;
+        body["max_concurrency"] = config_.worker.max_concurrency;
         body["active_model"] = config_.active_model.empty() ? nlohmann::json(nullptr) : nlohmann::json(config_.active_model);
         body["model_profile_count"] = config_.model_profiles.size();
         body["engine_path"] = config_.model.engine_path;
@@ -363,27 +455,38 @@ namespace yolo11_server {
 
     crow::response HttpController::handleReady(const crow::request& request) const {
         const std::string model_filter = getOptionalModelFilter(request);
+        const std::string task_kind_filter = getOptionalStringFilter(request, "task_kind");
+        const std::string worker_group_filter = getOptionalStringFilter(request, "worker_group");
+        const std::string worker_kind_filter = getOptionalStringFilter(request, "worker_kind");
+        const std::string stream_type_filter = getOptionalStringFilter(request, "stream_type");
+        const std::string gpu_id_filter = getOptionalStringFilter(request, "gpu_id");
         const std::string configured_model_type = toLowerString(config_.model.type);
+        const std::string profile_type = profileTypeForConfig(config_);
 
         nlohmann::json body;
         body["success"] = true;
         body["service"] = "yolo11_server";
         body["phase"] = phaseNameForConfig(config_);
         body["configured_model_type"] = configured_model_type;
-        body["model_filter"] = model_filter.empty() ? nlohmann::json(nullptr) : nlohmann::json(model_filter);
+        body["profile_type"] = profile_type;
+        body["capability_filters"] = capabilityFiltersToJson(
+            model_filter,
+            task_kind_filter,
+            worker_group_filter,
+            worker_kind_filter,
+            stream_type_filter,
+            gpu_id_filter
+        );
+        body["worker_group"] = config_.worker.worker_group;
+        body["worker_kind"] = config_.worker.worker_kind;
+        body["task_kind"] = config_.worker.task_kind;
+        body["stream_type"] = config_.worker.stream_type;
         body["server_status"] = "ok";
         body["redis_status"] = redis_mode_ ? "unknown" : "disabled";
         body["worker_status"] = "unknown";
         body["ready"] = false;
         body["expected_workers"] = config_.worker.worker_num;
         body["min_alive_workers"] = config_.worker.min_alive_workers;
-
-        if (!model_filter.empty() && model_filter != configured_model_type) {
-            body["success"] = false;
-            body["error_code"] = "MODEL_PROFILE_NOT_ACTIVE";
-            body["reason"] = "requested model is not the active model profile of this server process";
-            return makeJsonResponse(503, body);
-        }
 
         bool redis_ok = false;
         bool memory_ok = true;
@@ -448,7 +551,14 @@ namespace yolo11_server {
             workers_error)) {
             nlohmann::json arr = nlohmann::json::array();
             for (const auto& worker : workers) {
-                if (!workerMatchesModelFilter(worker, model_filter)) {
+                if (!workerMatchesFilters(
+                    worker,
+                    model_filter,
+                    task_kind_filter,
+                    worker_group_filter,
+                    worker_kind_filter,
+                    stream_type_filter,
+                    gpu_id_filter)) {
                     continue;
                 }
                 ++matched_workers;
@@ -487,7 +597,13 @@ namespace yolo11_server {
 
     crow::response HttpController::handleWorkers(const crow::request& request) const {
         const std::string model_filter = getOptionalModelFilter(request);
+        const std::string task_kind_filter = getOptionalStringFilter(request, "task_kind");
+        const std::string worker_group_filter = getOptionalStringFilter(request, "worker_group");
+        const std::string worker_kind_filter = getOptionalStringFilter(request, "worker_kind");
+        const std::string stream_type_filter = getOptionalStringFilter(request, "stream_type");
+        const std::string gpu_id_filter = getOptionalStringFilter(request, "gpu_id");
         const std::string configured_model_type = toLowerString(config_.model.type);
+        const std::string profile_type = profileTypeForConfig(config_);
 
         if (!redis_mode_) {
             nlohmann::json body;
@@ -495,19 +611,6 @@ namespace yolo11_server {
             body["error_code"] = "REDIS_DISABLED";
             body["error"] = "worker heartbeat query requires redis.enabled=true";
             return makeJsonResponse(503, body);
-        }
-
-        if (!model_filter.empty() && model_filter != configured_model_type) {
-            nlohmann::json body;
-            body["success"] = true;
-            body["configured_model_type"] = configured_model_type;
-            body["model_filter"] = model_filter;
-            body["expected_workers"] = 0;
-            body["min_alive_workers"] = 0;
-            body["alive_workers"] = 0;
-            body["workers"] = nlohmann::json::array();
-            body["note"] = "requested model is not the active model profile of this server process";
-            return makeJsonResponse(200, body);
         }
 
         std::vector<WorkerHeartbeatRecord> workers;
@@ -528,7 +631,14 @@ namespace yolo11_server {
         int matched_workers = 0;
         nlohmann::json arr = nlohmann::json::array();
         for (const auto& worker : workers) {
-            if (!workerMatchesModelFilter(worker, model_filter)) {
+            if (!workerMatchesFilters(
+                worker,
+                model_filter,
+                task_kind_filter,
+                worker_group_filter,
+                worker_kind_filter,
+                stream_type_filter,
+                gpu_id_filter)) {
                 continue;
             }
             ++matched_workers;
@@ -541,7 +651,19 @@ namespace yolo11_server {
         nlohmann::json body;
         body["success"] = true;
         body["configured_model_type"] = configured_model_type;
-        body["model_filter"] = model_filter.empty() ? nlohmann::json(nullptr) : nlohmann::json(model_filter);
+        body["profile_type"] = profile_type;
+        body["capability_filters"] = capabilityFiltersToJson(
+            model_filter,
+            task_kind_filter,
+            worker_group_filter,
+            worker_kind_filter,
+            stream_type_filter,
+            gpu_id_filter
+        );
+        body["worker_group"] = config_.worker.worker_group;
+        body["worker_kind"] = config_.worker.worker_kind;
+        body["task_kind"] = config_.worker.task_kind;
+        body["stream_type"] = config_.worker.stream_type;
         body["expected_workers"] = config_.worker.worker_num;
         body["matched_workers"] = matched_workers;
         body["min_alive_workers"] = config_.worker.min_alive_workers;
@@ -555,16 +677,13 @@ namespace yolo11_server {
 
     crow::response HttpController::handleMetrics(const crow::request& request) const {
         const std::string model_filter = getOptionalModelFilter(request);
+        const std::string task_kind_filter = getOptionalStringFilter(request, "task_kind");
+        const std::string worker_group_filter = getOptionalStringFilter(request, "worker_group");
+        const std::string worker_kind_filter = getOptionalStringFilter(request, "worker_kind");
+        const std::string stream_type_filter = getOptionalStringFilter(request, "stream_type");
+        const std::string gpu_id_filter = getOptionalStringFilter(request, "gpu_id");
         const std::string configured_model_type = toLowerString(config_.model.type);
-        // Phase 14.5 metrics hotfix:
-        // The stream server uses model.type=detect because the stream worker runs
-        // the normal detector on every frame, but the public runtime metric should
-        // describe the task kind that is being served. Without this split,
-        // /metrics on port 8083 reports models.detect and model=stream filtering
-        // looks empty even though stream_worker_1 is processing stream tasks.
-        const std::string metrics_profile_type = config_.stream.enabled
-            ? std::string("stream")
-            : (config_.video.enabled ? std::string("video") : configured_model_type);
+        const std::string metrics_profile_type = profileTypeForConfig(config_);
 
         if (!redis_mode_) {
             nlohmann::json body;
@@ -580,6 +699,14 @@ namespace yolo11_server {
             body["configured_model_type"] = configured_model_type;
             body["metrics_profile_type"] = metrics_profile_type;
             body["model_filter"] = model_filter;
+            body["capability_filters"] = capabilityFiltersToJson(
+                model_filter,
+                task_kind_filter,
+                worker_group_filter,
+                worker_kind_filter,
+                stream_type_filter,
+                gpu_id_filter
+            );
             body["metrics_found"] = false;
             body["total_tasks_done"] = 0;
             body["total_tasks_failed"] = 0;
@@ -627,7 +754,14 @@ namespace yolo11_server {
             workers,
             workers_error)) {
             for (const auto& worker : workers) {
-                if (!workerMatchesModelFilter(worker, model_filter)) {
+                if (!workerMatchesFilters(
+                    worker,
+                    model_filter,
+                    task_kind_filter,
+                    worker_group_filter,
+                    worker_kind_filter,
+                    stream_type_filter,
+                    gpu_id_filter)) {
                     continue;
                 }
                 if (worker.alive) {
@@ -640,6 +774,11 @@ namespace yolo11_server {
         nlohmann::json model_summary;
         model_summary["model_type"] = metrics_profile_type;
         model_summary["runner_model_type"] = configured_model_type;
+        model_summary["worker_group"] = config_.worker.worker_group;
+        model_summary["worker_kind"] = config_.worker.worker_kind;
+        model_summary["task_kind"] = config_.worker.task_kind;
+        model_summary["stream_type"] = config_.worker.stream_type;
+        model_summary["gpu_id"] = config_.model.gpu_id;
         model_summary["stream_key"] = config_.redis.stream_key;
         model_summary["consumer_group"] = config_.redis.consumer_group;
         model_summary["total_done"] = metrics.done_count;
@@ -657,7 +796,18 @@ namespace yolo11_server {
         body["phase"] = phaseNameForConfig(config_);
         body["configured_model_type"] = configured_model_type;
         body["metrics_profile_type"] = metrics_profile_type;
-        body["model_filter"] = model_filter.empty() ? nlohmann::json(nullptr) : nlohmann::json(model_filter);
+        body["capability_filters"] = capabilityFiltersToJson(
+            model_filter,
+            task_kind_filter,
+            worker_group_filter,
+            worker_kind_filter,
+            stream_type_filter,
+            gpu_id_filter
+        );
+        body["worker_group"] = config_.worker.worker_group;
+        body["worker_kind"] = config_.worker.worker_kind;
+        body["task_kind"] = config_.worker.task_kind;
+        body["stream_type"] = config_.worker.stream_type;
         body["models"] = nlohmann::json::object();
         body["models"][metrics_profile_type] = model_summary;
         body["metrics_enabled"] = config_.redis.metrics_enabled;
@@ -845,6 +995,14 @@ namespace yolo11_server {
 
     crow::response HttpController::handleDetectObbImageAsync(const crow::request& request) {
         return handleImageAsync(request, "obb");
+    }
+
+    crow::response HttpController::handleClassifyImageAsync(const crow::request& request) {
+        return handleImageAsync(request, "cls");
+    }
+
+    crow::response HttpController::handlePoseImageAsync(const crow::request& request) {
+        return handleImageAsync(request, "pose");
     }
 
     crow::response HttpController::handleImageAsync(const crow::request& request, const std::string& expected_model_type) {
@@ -1766,7 +1924,7 @@ namespace yolo11_server {
         nlohmann::json body;
         body["success"] = true;
         body["stream_id"] = stream_id;
-        body["task_kind"] = "stream";
+        body["task_kind"] = config_.worker.task_kind.empty() ? "live_stream" : config_.worker.task_kind;
         body["model_type"] = config_.model.type;
         body["status"] = "queued";
         body["lifecycle_status"] = "queued";
@@ -1875,7 +2033,7 @@ namespace yolo11_server {
         nlohmann::json body;
         body["success"] = status.status != "failed";
         body["stream_id"] = stream_id;
-        body["task_kind"] = "stream";
+        body["task_kind"] = config_.worker.task_kind.empty() ? "live_stream" : config_.worker.task_kind;
         body["model_type"] = status.model_type.empty() ? config_.model.type : status.model_type;
         body["status"] = status.status;
         body["lifecycle_status"] = status.status;
