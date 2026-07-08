@@ -2168,7 +2168,7 @@ namespace yolo11_server {
             context_,
             error,
             10000,
-            "HSET %s consumer_name %s pid %s host %s worker_id %d gpu_id %d model_type %s status %s current_task_id %s processed_count %lld failed_count %lld start_time_ms %lld last_heartbeat_ms %lld last_error %s",
+            "HSET %s consumer_name %s pid %s host %s worker_id %d gpu_id %d model_type %s runner_model_type %s worker_group %s worker_kind %s task_kind %s stream_type %s engine_path %s labels_path %s max_concurrency %d status %s current_task_id %s processed_count %lld failed_count %lld start_time_ms %lld last_heartbeat_ms %lld last_error %s",
             key.c_str(),
             heartbeat.consumer_name.c_str(),
             heartbeat.pid.c_str(),
@@ -2176,6 +2176,14 @@ namespace yolo11_server {
             heartbeat.worker_id,
             heartbeat.gpu_id,
             heartbeat.model_type.c_str(),
+            heartbeat.runner_model_type.c_str(),
+            heartbeat.worker_group.c_str(),
+            heartbeat.worker_kind.c_str(),
+            heartbeat.task_kind.c_str(),
+            heartbeat.stream_type.c_str(),
+            heartbeat.engine_path.c_str(),
+            heartbeat.labels_path.c_str(),
+            heartbeat.max_concurrency,
             heartbeat.status.c_str(),
             heartbeat.current_task_id.c_str(),
             heartbeat.processed_count,
@@ -2240,6 +2248,17 @@ namespace yolo11_server {
                 record.worker_id = static_cast<int>(parseLongLong(getValue("worker_id")));
                 record.gpu_id = static_cast<int>(parseLongLong(getValue("gpu_id")));
                 record.model_type = getValue("model_type");
+                record.runner_model_type = getValue("runner_model_type");
+                record.worker_group = getValue("worker_group");
+                record.worker_kind = getValue("worker_kind");
+                record.task_kind = getValue("task_kind");
+                record.stream_type = getValue("stream_type");
+                record.engine_path = getValue("engine_path");
+                record.labels_path = getValue("labels_path");
+                record.max_concurrency = static_cast<int>(parseLongLong(getValue("max_concurrency")));
+                if (record.max_concurrency <= 0) {
+                    record.max_concurrency = 1;
+                }
                 record.status = getValue("status");
                 record.current_task_id = getValue("current_task_id");
                 record.processed_count = parseLongLong(getValue("processed_count"));
