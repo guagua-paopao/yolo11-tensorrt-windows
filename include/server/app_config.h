@@ -58,6 +58,36 @@ namespace yolo11_server {
         double fallback_fps = 25.0;
     };
 
+
+    struct StreamSection {
+        // Phase 14: live stream / RTSP / camera task management.
+        bool enabled = false;
+
+        // camera / file / rtsp. Phase 14.0 can start with camera or file to validate lifecycle.
+        std::string default_source_type = "camera";
+        int default_camera_id = 0;
+        std::string default_rtsp_url;
+        std::string default_file_path;
+
+        // Latest snapshot is overwritten periodically, not every frame.
+        std::string snapshot_dir = "./runtime/output/streams";
+        int snapshot_interval_frames = 5;
+        int target_fps = 10;
+
+        // Phase 14.5: stream stability controls.
+        // max_no_frame_count is the short local tolerance before a reconnect/fail decision.
+        int max_no_frame_count = 30;
+        bool enable_reconnect = true;
+        int reconnect_max_attempts = 3;
+        int reconnect_delay_ms = 1000;
+
+        // 0 means unlimited. Useful for smoke tests and long-run guards.
+        int max_runtime_seconds = 0;
+
+        // JPEG quality for snapshot output.
+        int jpeg_quality = 90;
+    };
+
     struct RedisSection {
         bool enabled = true;
         std::string host = "127.0.0.1";
@@ -146,6 +176,7 @@ namespace yolo11_server {
         ModelSection model;
         OutputSection output;
         VideoSection video;
+        StreamSection stream;
         RedisSection redis;
         LoggingSection logging;
         WorkerSection worker;

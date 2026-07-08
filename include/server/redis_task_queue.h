@@ -34,6 +34,16 @@ namespace yolo11_server {
         long long video_total_frames = 0;
         long long video_duration_ms = 0;
 
+        // Phase 14 live stream task fields. stream_id is the user-facing stream task id.
+        // RedisTask::stream_id remains the Redis Stream message id for XACK.
+        std::string stream_task_id;
+        std::string source_type;
+        std::string source_uri;
+        int camera_id = 0;
+        std::string snapshot_path;
+        int snapshot_interval_frames = 5;
+        int target_fps = 10;
+
         long long create_time_ms = 0;
     };
 
@@ -125,6 +135,46 @@ namespace yolo11_server {
         long long last_heartbeat_ms = 0;
         long long last_heartbeat_age_ms = -1;
         std::string last_error;
+    };
+
+    struct StreamStartRequest {
+        std::string stream_id;
+        std::string source_type = "camera";
+        std::string source_uri;
+        int camera_id = 0;
+        std::string snapshot_path;
+        int snapshot_interval_frames = 5;
+        int target_fps = 10;
+        std::string model_type = "detect";
+        long long create_time_ms = 0;
+    };
+
+    struct StreamTaskStatus {
+        bool found = false;
+        std::string stream_id;
+        std::string status;
+        std::string model_type;
+        std::string source_type;
+        std::string source_uri;
+        int camera_id = 0;
+        std::string snapshot_path;
+        std::string latest_snapshot_path;
+        std::string error;
+        std::string last_error;
+        std::string consumer_name;
+        int worker_id = 0;
+        bool stop_requested = false;
+        long long create_time_ms = 0;
+        long long start_time_ms = 0;
+        long long stop_time_ms = 0;
+        long long last_update_ms = 0;
+        long long frame_count = 0;
+        double fps = 0.0;
+        int width = 0;
+        int height = 0;
+        int last_num_detections = 0;
+        int reconnect_count = 0;
+        int no_frame_count = 0;
     };
 
     class RedisTaskQueue {
@@ -225,6 +275,23 @@ namespace yolo11_server {
         bool requestCancelTask(const std::string& task_id, std::string& error) const;
         bool isCancelRequested(const std::string& task_id, bool& cancel_requested, std::string& error) const;
 
+        // Phase 14 live stream task helpers.
+        bool submitStreamTask(const StreamStartRequest& request, std::string& error) const;
+        bool markStreamStarting(const std::string& stream_id, long long start_time_ms, int worker_id, const std::string& consumer_name, std::string& error) const;
+        bool markStreamRunning(const std::string& stream_id, int width, int height, double fps, long long start_time_ms, int worker_id, const std::string& consumer_name, std::string& error) const;
+        bool markStreamReconnecting(const std::string& stream_id, const std::string& reason, int reconnect_count, int no_frame_count, long long update_time_ms, std::string& error) const;
+        bool updateStreamLatest(const std::string& stream_id, const std::string& latest_snapshot_path, long long frame_count, double fps, int width, int height, int last_num_detections, long long update_time_ms, std::string& error) const;
+        bool markStreamStopped(const std::string& stream_id, long long stop_time_ms, long long frame_count, std::string& error) const;
+        bool markStreamFailed(const std::string& stream_id, const std::string& error_message, long long stop_time_ms, long long frame_count, std::string& error) const;
+        bool requestStopStreamTask(const std::string& stream_id, std::string& error) const;
+        bool isStreamStopRequested(const std::string& stream_id, bool& stop_requested, std::string& error) const;
+        bool getStreamTaskStatus(const std::string& stream_id, StreamTaskStatus& status, std::string& error) const;
+
+        // Phase 14.0 Hotfix: guard single-live-stream mode.
+        // The active stream key prevents repeated /stream/start calls from queuing
+        // several long-running camera/RTSP tasks for one stream worker.
+        bool getActiveStreamTask(StreamTaskStatus& status, std::string& error) const;
+
         bool getTaskStatus(const std::string& task_id, RedisTaskStatus& status, std::string& error) const;
 
         bool popTask(RedisTask& task, std::string& error) const;
@@ -262,6 +329,10 @@ namespace yolo11_server {
         std::string statusKey(const std::string& task_id) const;
         std::string resultKey(const std::string& task_id) const;
         std::string metaKey(const std::string& task_id) const;
+        std::string streamTaskStatusKey(const std::string& stream_id) const;
+        std::string streamTaskMetaKey(const std::string& stream_id) const;
+        std::string streamTaskLatestKey(const std::string& stream_id) const;
+        std::string activeStreamTaskKey() const;
 
     private:
         RedisSection config_;

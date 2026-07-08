@@ -298,6 +298,51 @@ namespace yolo11_server {
             return text;
         }
 
+        RedisReplyPtr commandWithReconnectLocked(
+            const RedisSection& config,
+            redisContext*& context,
+            std::string& error,
+            int command_timeout_ms,
+            const char* format,
+            ...
+        );
+
+        bool isTerminalStreamStatus(const std::string& status) {
+            return status.empty() || status == "stopped" || status == "failed";
+        }
+
+        bool releaseActiveStreamIfMatchedLocked(
+            const RedisSection& config,
+            redisContext*& context,
+            const std::string& active_key,
+            const std::string& stream_id,
+            std::string& error
+        ) {
+            RedisReplyPtr current_reply = commandWithReconnectLocked(
+                config, context, error, 10000,
+                "GET %s",
+                active_key.c_str()
+            );
+            if (replyIsError(current_reply.get(), error, context)) {
+                return false;
+            }
+            if (current_reply->type == REDIS_REPLY_NIL) {
+                return true;
+            }
+
+            const std::string active_stream_id = replyString(current_reply.get());
+            if (active_stream_id != stream_id) {
+                return true;
+            }
+
+            RedisReplyPtr del_reply = commandWithReconnectLocked(
+                config, context, error, 10000,
+                "DEL %s",
+                active_key.c_str()
+            );
+            return !replyIsError(del_reply.get(), error, context);
+        }
+
         bool fillTaskFromStreamEntry(redisReply* entry_reply, RedisTask& task, std::string& error) {
             task = RedisTask{};
 
@@ -328,9 +373,21 @@ namespace yolo11_server {
             task.input_video_path = fields["input_video_path"];
             task.output_video_path = fields["output_video_path"];
             task.output_video_filename = fields["output_video_filename"];
+            task.stream_task_id = fields["stream_id"];
+            task.source_type = fields["source_type"];
+            task.source_uri = fields["source_uri"];
+            task.camera_id = static_cast<int>(parseLongLong(fields["camera_id"]));
+            task.snapshot_path = fields["snapshot_path"];
+            task.snapshot_interval_frames = static_cast<int>(parseLongLong(fields["snapshot_interval_frames"], 5));
+            task.target_fps = static_cast<int>(parseLongLong(fields["target_fps"], 10));
             task.create_time_ms = parseLongLong(fields["create_time_ms"]);
             if (task.task_kind.empty()) {
-                task.task_kind = task.input_video_path.empty() ? "image" : "video";
+                if (!task.stream_task_id.empty()) {
+                    task.task_kind = "stream";
+                }
+                else {
+                    task.task_kind = task.input_video_path.empty() ? "image" : "video";
+                }
             }
             if (task.model_type.empty()) {
                 task.model_type = "detect";
@@ -343,6 +400,12 @@ namespace yolo11_server {
             if (task.task_kind == "video") {
                 if (task.input_video_path.empty() || task.output_video_path.empty()) {
                     error = "invalid redis stream message: missing input_video_path/output_video_path";
+                    return false;
+                }
+            }
+            else if (task.task_kind == "stream") {
+                if (task.stream_task_id.empty() || task.source_type.empty() || task.snapshot_path.empty()) {
+                    error = "invalid redis stream message: missing stream_id/source_type/snapshot_path";
                     return false;
                 }
             }
@@ -1120,6 +1183,419 @@ namespace yolo11_server {
         return true;
     }
 
+    bool RedisTaskQueue::submitStreamTask(const StreamStartRequest& request, std::string& error) const {
+        if (request.stream_id.empty()) {
+            error = "empty stream_id";
+            return false;
+        }
+        if (request.source_type.empty()) {
+            error = "empty stream source_type";
+            return false;
+        }
+        if (request.snapshot_path.empty()) {
+            error = "empty stream snapshot_path";
+            return false;
+        }
+
+        const long long create_time_ms = request.create_time_ms > 0 ? request.create_time_ms : nowMs();
+        const int ttl = taskTtlSeconds(config_);
+        const std::string status_key = streamTaskStatusKey(request.stream_id);
+        const std::string meta_key = streamTaskMetaKey(request.stream_id);
+        const std::string latest_key = streamTaskLatestKey(request.stream_id);
+        const std::string active_key = activeStreamTaskKey();
+
+        std::lock_guard<std::mutex> lock(context_mutex_);
+
+        auto reserve_active_stream = [&]() -> bool {
+            RedisReplyPtr set_active_reply = commandWithReconnectLocked(
+                config_, context_, error, 10000,
+                "SET %s %s NX EX %d",
+                active_key.c_str(), request.stream_id.c_str(), ttl
+            );
+            if (replyIsError(set_active_reply.get(), error, context_)) {
+                return false;
+            }
+            if (set_active_reply->type != REDIS_REPLY_NIL) {
+                return true;
+            }
+
+            RedisReplyPtr current_reply = commandWithReconnectLocked(
+                config_, context_, error, 10000,
+                "GET %s",
+                active_key.c_str()
+            );
+            if (replyIsError(current_reply.get(), error, context_)) {
+                return false;
+            }
+
+            const std::string active_stream_id = current_reply->type == REDIS_REPLY_NIL
+                ? std::string{}
+                : replyString(current_reply.get());
+
+            std::string active_status;
+            if (!active_stream_id.empty()) {
+                RedisReplyPtr active_status_reply = commandWithReconnectLocked(
+                    config_, context_, error, 10000,
+                    "GET %s",
+                    streamTaskStatusKey(active_stream_id).c_str()
+                );
+                if (replyIsError(active_status_reply.get(), error, context_)) {
+                    return false;
+                }
+                if (active_status_reply->type != REDIS_REPLY_NIL) {
+                    active_status = replyString(active_status_reply.get());
+                }
+            }
+
+            if (!active_stream_id.empty() && !isTerminalStreamStatus(active_status)) {
+                error = "ACTIVE_STREAM_RUNNING:" + active_stream_id;
+                return false;
+            }
+
+            RedisReplyPtr delete_stale_reply = commandWithReconnectLocked(
+                config_, context_, error, 10000,
+                "DEL %s",
+                active_key.c_str()
+            );
+            if (replyIsError(delete_stale_reply.get(), error, context_)) {
+                return false;
+            }
+
+            RedisReplyPtr retry_reply = commandWithReconnectLocked(
+                config_, context_, error, 10000,
+                "SET %s %s NX EX %d",
+                active_key.c_str(), request.stream_id.c_str(), ttl
+            );
+            if (replyIsError(retry_reply.get(), error, context_)) {
+                return false;
+            }
+            if (retry_reply->type == REDIS_REPLY_NIL) {
+                error = active_stream_id.empty()
+                    ? "ACTIVE_STREAM_RUNNING"
+                    : "ACTIVE_STREAM_RUNNING:" + active_stream_id;
+                return false;
+            }
+            return true;
+        };
+
+        if (!reserve_active_stream()) {
+            return false;
+        }
+
+        auto rollback_active_stream = [&]() {
+            std::string ignored;
+            (void)releaseActiveStreamIfMatchedLocked(config_, context_, active_key, request.stream_id, ignored);
+        };
+
+        RedisReplyPtr status_reply = commandWithReconnectLocked(
+            config_, context_, error, 10000,
+            "SETEX %s %d %s",
+            status_key.c_str(), ttl, "created");
+        if (replyIsError(status_reply.get(), error, context_)) {
+            rollback_active_stream();
+            return false;
+        }
+
+        RedisReplyPtr meta_reply = commandWithReconnectLocked(
+            config_, context_, error, 10000,
+            "HSET %s stream_id %s task_kind %s model_type %s source_type %s source_uri %s camera_id %d snapshot_path %s snapshot_interval_frames %d target_fps %d create_time_ms %lld start_time_ms %lld stop_time_ms %lld frame_count %lld fps %.6f width %d height %d reconnect_count %d no_frame_count %d stop_requested %s worker_id %d consumer_name %s error %s last_error %s",
+            meta_key.c_str(),
+            request.stream_id.c_str(),
+            "stream",
+            request.model_type.empty() ? "detect" : request.model_type.c_str(),
+            request.source_type.c_str(),
+            request.source_uri.c_str(),
+            request.camera_id,
+            request.snapshot_path.c_str(),
+            request.snapshot_interval_frames,
+            request.target_fps,
+            create_time_ms,
+            0LL,
+            0LL,
+            0LL,
+            0.0,
+            0,
+            0,
+            0,
+            0,
+            "0",
+            0,
+            "",
+            "",
+            "");
+        if (replyIsError(meta_reply.get(), error, context_)) {
+            rollback_active_stream();
+            return false;
+        }
+        if (!expireKey(context_, meta_key, ttl, error)) {
+            rollback_active_stream();
+            return false;
+        }
+
+        RedisReplyPtr latest_reply = commandWithReconnectLocked(
+            config_, context_, error, 10000,
+            "HSET %s stream_id %s latest_snapshot_path %s frame_count %lld fps %.6f width %d height %d last_num_detections %d last_update_ms %lld",
+            latest_key.c_str(),
+            request.stream_id.c_str(),
+            request.snapshot_path.c_str(),
+            0LL,
+            0.0,
+            0,
+            0,
+            0,
+            0LL);
+        if (replyIsError(latest_reply.get(), error, context_)) {
+            rollback_active_stream();
+            return false;
+        }
+        if (!expireKey(context_, latest_key, ttl, error)) {
+            rollback_active_stream();
+            return false;
+        }
+
+        RedisReplyPtr stream_reply = commandWithReconnectLocked(
+            config_, context_, error, 10000,
+            "XADD %s * task_id %s task_kind %s model_type %s stream_id %s source_type %s source_uri %s camera_id %d snapshot_path %s snapshot_interval_frames %d target_fps %d create_time_ms %lld",
+            config_.stream_key.c_str(),
+            request.stream_id.c_str(),
+            "stream",
+            request.model_type.empty() ? "detect" : request.model_type.c_str(),
+            request.stream_id.c_str(),
+            request.source_type.c_str(),
+            request.source_uri.c_str(),
+            request.camera_id,
+            request.snapshot_path.c_str(),
+            request.snapshot_interval_frames,
+            request.target_fps,
+            create_time_ms);
+        if (replyIsError(stream_reply.get(), error, context_)) {
+            rollback_active_stream();
+            return false;
+        }
+
+        if (config_.stream_max_len > 0) {
+            RedisReplyPtr trim_reply = commandWithReconnectLocked(
+                config_, context_, error, 10000,
+                "XTRIM %s MAXLEN ~ %lld",
+                config_.stream_key.c_str(),
+                config_.stream_max_len);
+            if (replyIsError(trim_reply.get(), error, context_)) {
+                error = "XTRIM stream task failed: " + error;
+                rollback_active_stream();
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool RedisTaskQueue::markStreamStarting(const std::string& stream_id, long long start_time_ms, int worker_id, const std::string& consumer_name, std::string& error) const {
+        std::lock_guard<std::mutex> lock(context_mutex_);
+        const int ttl = taskTtlSeconds(config_);
+        RedisReplyPtr status_reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "SETEX %s %d %s", streamTaskStatusKey(stream_id).c_str(), ttl, "starting");
+        if (replyIsError(status_reply.get(), error, context_)) return false;
+        RedisReplyPtr meta_reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "HSET %s start_time_ms %lld worker_id %d consumer_name %s status %s",
+            streamTaskMetaKey(stream_id).c_str(), start_time_ms, worker_id, consumer_name.c_str(), "starting");
+        if (replyIsError(meta_reply.get(), error, context_)) return false;
+        return expireKey(context_, streamTaskMetaKey(stream_id), ttl, error);
+    }
+
+    bool RedisTaskQueue::markStreamRunning(const std::string& stream_id, int width, int height, double fps, long long start_time_ms, int worker_id, const std::string& consumer_name, std::string& error) const {
+        std::lock_guard<std::mutex> lock(context_mutex_);
+        const int ttl = taskTtlSeconds(config_);
+        RedisReplyPtr status_reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "SETEX %s %d %s", streamTaskStatusKey(stream_id).c_str(), ttl, "running");
+        if (replyIsError(status_reply.get(), error, context_)) return false;
+        RedisReplyPtr meta_reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "HSET %s status %s start_time_ms %lld worker_id %d consumer_name %s width %d height %d fps %.6f no_frame_count %d error %s last_error %s",
+            streamTaskMetaKey(stream_id).c_str(), "running", start_time_ms, worker_id, consumer_name.c_str(), width, height, fps, 0, "", "");
+        if (replyIsError(meta_reply.get(), error, context_)) return false;
+        return expireKey(context_, streamTaskMetaKey(stream_id), ttl, error);
+    }
+
+    bool RedisTaskQueue::markStreamReconnecting(const std::string& stream_id, const std::string& reason, int reconnect_count, int no_frame_count, long long update_time_ms, std::string& error) const {
+        std::lock_guard<std::mutex> lock(context_mutex_);
+        const int ttl = taskTtlSeconds(config_);
+        RedisReplyPtr status_reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "SETEX %s %d %s", streamTaskStatusKey(stream_id).c_str(), ttl, "reconnecting");
+        if (replyIsError(status_reply.get(), error, context_)) return false;
+        RedisReplyPtr meta_reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "HSET %s status %s last_error %s error %s reconnect_count %d no_frame_count %d last_update_ms %lld",
+            streamTaskMetaKey(stream_id).c_str(), "reconnecting", reason.c_str(), reason.c_str(), reconnect_count, no_frame_count, update_time_ms);
+        if (replyIsError(meta_reply.get(), error, context_)) return false;
+        return expireKey(context_, streamTaskMetaKey(stream_id), ttl, error);
+    }
+
+    bool RedisTaskQueue::updateStreamLatest(const std::string& stream_id, const std::string& latest_snapshot_path, long long frame_count, double fps, int width, int height, int last_num_detections, long long update_time_ms, std::string& error) const {
+        std::lock_guard<std::mutex> lock(context_mutex_);
+        const int ttl = taskTtlSeconds(config_);
+        RedisReplyPtr latest_reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "HSET %s stream_id %s latest_snapshot_path %s frame_count %lld fps %.6f width %d height %d last_num_detections %d last_update_ms %lld",
+            streamTaskLatestKey(stream_id).c_str(), stream_id.c_str(), latest_snapshot_path.c_str(), frame_count, fps, width, height, last_num_detections, update_time_ms);
+        if (replyIsError(latest_reply.get(), error, context_)) return false;
+        if (!expireKey(context_, streamTaskLatestKey(stream_id), ttl, error)) return false;
+        RedisReplyPtr meta_reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "HSET %s latest_snapshot_path %s frame_count %lld fps %.6f width %d height %d last_num_detections %d last_update_ms %lld no_frame_count %d",
+            streamTaskMetaKey(stream_id).c_str(), latest_snapshot_path.c_str(), frame_count, fps, width, height, last_num_detections, update_time_ms, 0);
+        if (replyIsError(meta_reply.get(), error, context_)) return false;
+        return expireKey(context_, streamTaskMetaKey(stream_id), ttl, error);
+    }
+
+    bool RedisTaskQueue::markStreamStopped(const std::string& stream_id, long long stop_time_ms, long long frame_count, std::string& error) const {
+        std::lock_guard<std::mutex> lock(context_mutex_);
+        const int ttl = taskTtlSeconds(config_);
+        RedisReplyPtr meta_reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "HSET %s status %s stop_time_ms %lld frame_count %lld stop_requested %s no_frame_count %d last_update_ms %lld",
+            streamTaskMetaKey(stream_id).c_str(), "stopped", stop_time_ms, frame_count, "0", 0, stop_time_ms);
+        if (replyIsError(meta_reply.get(), error, context_)) return false;
+        if (!expireKey(context_, streamTaskMetaKey(stream_id), ttl, error)) return false;
+        RedisReplyPtr status_reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "SETEX %s %d %s", streamTaskStatusKey(stream_id).c_str(), ttl, "stopped");
+        if (replyIsError(status_reply.get(), error, context_)) return false;
+        return releaseActiveStreamIfMatchedLocked(config_, context_, activeStreamTaskKey(), stream_id, error);
+    }
+
+    bool RedisTaskQueue::markStreamFailed(const std::string& stream_id, const std::string& error_message, long long stop_time_ms, long long frame_count, std::string& error) const {
+        std::lock_guard<std::mutex> lock(context_mutex_);
+        const int ttl = taskTtlSeconds(config_);
+        RedisReplyPtr meta_reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "HSET %s status %s stop_time_ms %lld frame_count %lld error %s last_error %s last_update_ms %lld",
+            streamTaskMetaKey(stream_id).c_str(), "failed", stop_time_ms, frame_count, error_message.c_str(), error_message.c_str(), stop_time_ms);
+        if (replyIsError(meta_reply.get(), error, context_)) return false;
+        if (!expireKey(context_, streamTaskMetaKey(stream_id), ttl, error)) return false;
+        RedisReplyPtr status_reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "SETEX %s %d %s", streamTaskStatusKey(stream_id).c_str(), ttl, "failed");
+        if (replyIsError(status_reply.get(), error, context_)) return false;
+        return releaseActiveStreamIfMatchedLocked(config_, context_, activeStreamTaskKey(), stream_id, error);
+    }
+
+    bool RedisTaskQueue::requestStopStreamTask(const std::string& stream_id, std::string& error) const {
+        std::lock_guard<std::mutex> lock(context_mutex_);
+        const int ttl = taskTtlSeconds(config_);
+        RedisReplyPtr meta_reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "HSET %s stop_requested 1 status %s",
+            streamTaskMetaKey(stream_id).c_str(), "stopping");
+        if (replyIsError(meta_reply.get(), error, context_)) return false;
+        if (!expireKey(context_, streamTaskMetaKey(stream_id), ttl, error)) return false;
+        RedisReplyPtr status_reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "SETEX %s %d %s", streamTaskStatusKey(stream_id).c_str(), ttl, "stopping");
+        return !replyIsError(status_reply.get(), error, context_);
+    }
+
+    bool RedisTaskQueue::isStreamStopRequested(const std::string& stream_id, bool& stop_requested, std::string& error) const {
+        stop_requested = false;
+        std::lock_guard<std::mutex> lock(context_mutex_);
+        RedisReplyPtr reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "HGET %s stop_requested", streamTaskMetaKey(stream_id).c_str());
+        if (replyIsError(reply.get(), error, context_)) return false;
+        if (reply->type == REDIS_REPLY_NIL) return true;
+        stop_requested = parseLongLong(replyString(reply.get())) != 0;
+        return true;
+    }
+
+    bool RedisTaskQueue::getStreamTaskStatus(const std::string& stream_id, StreamTaskStatus& status, std::string& error) const {
+        status = StreamTaskStatus{};
+        status.stream_id = stream_id;
+        std::lock_guard<std::mutex> lock(context_mutex_);
+
+        RedisReplyPtr status_reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "GET %s", streamTaskStatusKey(stream_id).c_str());
+        if (replyIsError(status_reply.get(), error, context_)) return false;
+        if (status_reply->type == REDIS_REPLY_NIL) {
+            status.found = false;
+            return true;
+        }
+        status.found = true;
+        status.status = replyString(status_reply.get());
+
+        RedisReplyPtr meta_reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "HGETALL %s", streamTaskMetaKey(stream_id).c_str());
+        if (!replyIsError(meta_reply.get(), error, context_)) {
+            const auto values = parseHashReply(meta_reply.get());
+            auto getValue = [&values](const std::string& key) -> std::string {
+                auto it = values.find(key);
+                return it == values.end() ? std::string{} : it->second;
+            };
+            status.model_type = getValue("model_type");
+            status.source_type = getValue("source_type");
+            status.source_uri = getValue("source_uri");
+            status.camera_id = static_cast<int>(parseLongLong(getValue("camera_id")));
+            status.snapshot_path = getValue("snapshot_path");
+            status.latest_snapshot_path = getValue("latest_snapshot_path");
+            status.error = getValue("error");
+            status.last_error = getValue("last_error");
+            status.consumer_name = getValue("consumer_name");
+            status.worker_id = static_cast<int>(parseLongLong(getValue("worker_id")));
+            status.stop_requested = parseLongLong(getValue("stop_requested")) != 0;
+            status.create_time_ms = parseLongLong(getValue("create_time_ms"));
+            status.start_time_ms = parseLongLong(getValue("start_time_ms"));
+            status.stop_time_ms = parseLongLong(getValue("stop_time_ms"));
+            status.last_update_ms = parseLongLong(getValue("last_update_ms"));
+            status.frame_count = parseLongLong(getValue("frame_count"));
+            status.fps = parseDouble(getValue("fps"));
+            status.width = static_cast<int>(parseLongLong(getValue("width")));
+            status.height = static_cast<int>(parseLongLong(getValue("height")));
+            status.last_num_detections = static_cast<int>(parseLongLong(getValue("last_num_detections")));
+            status.reconnect_count = static_cast<int>(parseLongLong(getValue("reconnect_count")));
+            status.no_frame_count = static_cast<int>(parseLongLong(getValue("no_frame_count")));
+        }
+
+        RedisReplyPtr latest_reply = commandWithReconnectLocked(config_, context_, error, 10000,
+            "HGETALL %s", streamTaskLatestKey(stream_id).c_str());
+        if (!replyIsError(latest_reply.get(), error, context_)) {
+            const auto latest = parseHashReply(latest_reply.get());
+            auto getLatest = [&latest](const std::string& key) -> std::string {
+                auto it = latest.find(key);
+                return it == latest.end() ? std::string{} : it->second;
+            };
+            const std::string latest_snapshot_path = getLatest("latest_snapshot_path");
+            if (!latest_snapshot_path.empty()) status.latest_snapshot_path = latest_snapshot_path;
+            const long long frame_count = parseLongLong(getLatest("frame_count"), -1);
+            if (frame_count >= 0) status.frame_count = frame_count;
+            const double fps = parseDouble(getLatest("fps"), -1.0);
+            if (fps >= 0.0) status.fps = fps;
+            const long long last_update_ms = parseLongLong(getLatest("last_update_ms"), -1);
+            if (last_update_ms >= 0) status.last_update_ms = last_update_ms;
+            const long long width = parseLongLong(getLatest("width"), -1);
+            if (width >= 0) status.width = static_cast<int>(width);
+            const long long height = parseLongLong(getLatest("height"), -1);
+            if (height >= 0) status.height = static_cast<int>(height);
+            const long long dets = parseLongLong(getLatest("last_num_detections"), -1);
+            if (dets >= 0) status.last_num_detections = static_cast<int>(dets);
+        }
+
+        return true;
+    }
+
+    bool RedisTaskQueue::getActiveStreamTask(StreamTaskStatus& status, std::string& error) const {
+        status = StreamTaskStatus{};
+        std::string active_stream_id;
+        {
+            std::lock_guard<std::mutex> lock(context_mutex_);
+            RedisReplyPtr active_reply = commandWithReconnectLocked(
+                config_, context_, error, 10000,
+                "GET %s",
+                activeStreamTaskKey().c_str()
+            );
+            if (replyIsError(active_reply.get(), error, context_)) {
+                return false;
+            }
+            if (active_reply->type == REDIS_REPLY_NIL) {
+                status.found = false;
+                return true;
+            }
+            active_stream_id = replyString(active_reply.get());
+        }
+
+        if (active_stream_id.empty()) {
+            status.found = false;
+            return true;
+        }
+        return getStreamTaskStatus(active_stream_id, status, error);
+    }
+
     bool RedisTaskQueue::getTaskStatus(const std::string& task_id, RedisTaskStatus& status, std::string& error) const {
         status = RedisTaskStatus{};
         status.task_id = task_id;
@@ -1697,6 +2173,22 @@ namespace yolo11_server {
 
     std::string RedisTaskQueue::metricsRecentDoneKey() const {
         return "yolo:metrics:" + sanitizeRedisKeyPart(config_.stream_key) + ":recent:done";
+    }
+
+    std::string RedisTaskQueue::streamTaskStatusKey(const std::string& stream_id) const {
+        return "yolo:streamtask:" + stream_id + ":status";
+    }
+
+    std::string RedisTaskQueue::streamTaskMetaKey(const std::string& stream_id) const {
+        return "yolo:streamtask:" + stream_id + ":meta";
+    }
+
+    std::string RedisTaskQueue::streamTaskLatestKey(const std::string& stream_id) const {
+        return "yolo:streamtask:" + stream_id + ":latest";
+    }
+
+    std::string RedisTaskQueue::activeStreamTaskKey() const {
+        return "yolo:streamtask:" + sanitizeRedisKeyPart(config_.stream_key) + ":active";
     }
 
     std::string RedisTaskQueue::statusKey(const std::string& task_id) const {
