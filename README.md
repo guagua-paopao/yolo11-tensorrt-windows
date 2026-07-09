@@ -2,38 +2,23 @@
 
 Windows-based YOLO11 TensorRT deployment project using Visual Studio 2019, CUDA, TensorRT 10, OpenCV, Crow, hiredis, Redis Stream, spdlog, yaml-cpp, nlohmann/json, and reusable C++ runtime APIs.
 
-The current baseline is **Phase 17.5: CLS + Pose async image services on top of the Phase 16 engineering-freeze baseline**.
+Current baseline: **Phase 18 / 18.5 release-candidate baseline**. The project now provides YOLO11 five-model async image services (**Detect / OBB / CLS / Pose / Seg**), plus Detect video-file async service, single live-stream Detect service, Worker Capability Registry, health/readiness/metrics endpoints, Redis Stream queues, and unified start/check/regression/stop scripts.
 
-The project now supports:
-
-```text
-Detect image async service
-OBB image async service
-CLS image async service
-Pose image async service
-Detect video-file async service
-Single live-stream detect service
-Worker Capability Registry
-Health / Ready / Workers / Metrics APIs
-Redis Stream task queues
-Redis Binary image storage
-Local video/stream runtime storage
-```
-
-This README is deployment-oriented. It focuses on build, startup, validation, APIs, and troubleshooting.
+This README is deployment-oriented. It focuses on environment setup, build, service startup, validation, APIs, and troubleshooting.
 
 ---
 
-## Current Service Matrix
+## Service Matrix
 
-| Service | Port | Server Config | Worker Config | Worker Executable | Redis Stream | Consumer Group | Worker |
-|---|---:|---|---|---|---|---|---|
-| Detect image | 8080 | `config/server_detect.yaml` | `config/worker_detect.yaml` | `yolo11_worker.exe` | `yolo:stream:detect` | `yolo11_group` | `worker_1` |
-| OBB image | 8081 | `config/server_obb.yaml` | `config/worker_obb.yaml` | `yolo11_worker.exe` | `yolo:stream:obb` | `yolo11_obb_group` | `obb_worker_1` |
-| Video file detect | 8082 | `config/server_video.yaml` | `config/worker_video.yaml` | `yolo11_video_worker.exe` | `yolo:stream:video:detect` | `yolo11_video_detect_group` | `video_worker_1` |
-| Live stream detect | 8083 | `config/server_stream.yaml` | `config/worker_stream.yaml` | `yolo11_stream_worker.exe` | `yolo:stream:live:detect` | `yolo11_stream_detect_group` | `stream_worker_1` |
-| CLS image | 8084 | `config/server_cls.yaml` | `config/worker_cls.yaml` | `yolo11_worker.exe` | `yolo:stream:cls` | `yolo11_cls_group` | `cls_worker_1` |
-| Pose image | 8085 | `config/server_pose.yaml` | `config/worker_pose.yaml` | `yolo11_worker.exe` | `yolo:stream:pose` | `yolo11_pose_group` | `pose_worker_1` |
+| Service | Port | Main API | Server Config | Worker Config | Worker Executable | Redis Stream | Consumer Group | Worker |
+|---|---:|---|---|---|---|---|---|---|
+| Detect image | 8080 | `/api/v1/detect/image/async` | `config/server_detect.yaml` | `config/worker_detect.yaml` | `yolo11_worker.exe` | `yolo:stream:detect` | `yolo11_group` | `worker_1` |
+| OBB image | 8081 | `/api/v1/detect/obb/async` | `config/server_obb.yaml` | `config/worker_obb.yaml` | `yolo11_worker.exe` | `yolo:stream:obb` | `yolo11_obb_group` | `obb_worker_1` |
+| Video file detect | 8082 | `/api/v1/detect/video/async` | `config/server_video.yaml` | `config/worker_video.yaml` | `yolo11_video_worker.exe` | `yolo:stream:video:detect` | `yolo11_video_detect_group` | `video_worker_1` |
+| Live stream detect | 8083 | `/api/v1/stream/start` | `config/server_stream.yaml` | `config/worker_stream.yaml` | `yolo11_stream_worker.exe` | `yolo:stream:live:detect` | `yolo11_stream_detect_group` | `stream_worker_1` |
+| CLS image | 8084 | `/api/v1/classify/image/async` | `config/server_cls.yaml` | `config/worker_cls.yaml` | `yolo11_worker.exe` | `yolo:stream:cls` | `yolo11_cls_group` | `cls_worker_1` |
+| Pose image | 8085 | `/api/v1/pose/image/async` | `config/server_pose.yaml` | `config/worker_pose.yaml` | `yolo11_worker.exe` | `yolo:stream:pose` | `yolo11_pose_group` | `pose_worker_1` |
+| Seg image | 8086 | `/api/v1/segment/image/async` | `config/server_seg.yaml` | `config/worker_seg.yaml` | `yolo11_worker.exe` | `yolo:stream:seg` | `yolo11_seg_group` | `seg_worker_1` |
 
 ---
 
@@ -41,36 +26,20 @@ This README is deployment-oriented. It focuses on build, startup, validation, AP
 
 | Area | Status |
 |---|---|
-| YOLO11 Detect command-line inference | Supported |
-| YOLO11 OBB command-line inference | Supported |
-| YOLO11 CLS command-line inference | Supported |
-| YOLO11 Pose command-line inference | Supported |
-| Reusable C++ Detect API | `Yolo11Detector` |
-| Reusable C++ OBB API | `Yolo11ObbDetector` |
-| Reusable C++ CLS API | `Yolo11ClsDetector` |
-| Reusable C++ Pose API | `Yolo11PoseDetector` |
-| Pure C++ HTTP service | Supported by Crow |
+| YOLO11 command-line inference | Detect / OBB / CLS / Pose / Seg supported |
+| Reusable C++ APIs | `Yolo11Detector`, `Yolo11ObbDetector`, `Yolo11ClsDetector`, `Yolo11PoseDetector`, `Yolo11SegDetector` |
+| Pure C++ HTTP service | Crow-based `yolo11_server.exe` |
 | Server / Worker process split | Supported |
-| Redis Stream async queue | Supported |
-| Redis binary image storage | Supported for image tasks |
-| Local file video storage | Supported for video tasks |
-| Live stream lifecycle | Single-stream `start/status/snapshot/stop` supported |
-| Worker heartbeat and readiness | Supported |
-| Worker-offline submission protection | Supported, returns HTTP 503 |
-| Pending reclaim | Supported with `XAUTOCLAIM` |
-| Stream trimming | Supported with `XTRIM MAXLEN ~` |
-| Structured logs | Supported under `runtime/logs/...` |
-| External labels | Supported through `labels_path` |
-| Metrics API | Supported |
-| Worker Capability Registry | Supported for Detect / OBB / Video / Stream / CLS / Pose |
-| Model output abstraction | `ModelOutput` supports detections and classifications; Pose uses bbox + keypoints |
-| Phase 16 service orchestration | `scripts/start_all.ps1`, `stop_all.ps1`, `check_all.ps1` |
-| Phase 17 CLS orchestration | `scripts/start_cls.ps1`, `stop_cls.ps1` |
-| Phase 17.5 Pose orchestration | `scripts/start_pose.ps1`, `stop_pose.ps1` |
-| Regression suites | `tools/run_full_regression.py`, `tools/run_phase17_regression.py`, `tools/run_phase17_5_regression.py` |
-| Seg HTTP service | Planned for Phase 18 |
-| Multi-GPU automatic scheduling | Planned, not implemented yet |
-| Docker / Linux deployment | Planned as a later deployment branch |
+| Redis Stream async queue | Supported with Consumer Groups, `XACK`, `XAUTOCLAIM`, `XPENDING`, and `XTRIM` |
+| Redis binary image storage | Used by image tasks |
+| Local video/stream runtime storage | Used by video result files and live-stream snapshots |
+| Worker heartbeat and readiness | Supported through `yolo:worker:{consumer}:heartbeat` |
+| Worker Capability Registry | Supported for Detect / OBB / Video / Stream / CLS / Pose / Seg |
+| Metrics API | Per-service task counts, latency, recent QPS, worker distribution, Redis pending |
+| Model output abstraction | `ModelOutput` supports bbox detections, OBB, classifications, pose keypoints, and segmentation mask/polygon metadata |
+| Unified orchestration | `scripts/start_all.ps1`, `scripts/check_all.ps1`, `tools/run_phase18_regression.py`, `scripts/stop_all.ps1` |
+| Final regression status | Phase 18 regression passed: Seg registry/smoke/invalid-input + Phase 17.5/17/16 regression chain |
+| Out of scope before final freeze | Multi-GPU automatic scheduler, multi-stream RTSP platform, database/object storage, Docker/Linux production branch, WebSocket/SSE push |
 
 ---
 
@@ -92,15 +61,16 @@ This README is deployment-oriented. It focuses on build, startup, validation, AP
 | Phase 10.5 | Multi-model config and `IModelRunner` refactor |
 | Phase 11.0 | OBB stability, invalid input, and Worker recovery validation |
 | Phase 12.0 | Detect + OBB dual parallel service deployment |
-| Phase 13.0 | Detection video-file async service minimal loop |
+| Phase 13.0 | Detect video-file async service minimal loop |
 | Phase 13.5 | Video stability, cancellation, invalid input, Worker recovery, benchmark |
-| Structure cleanup | Clean config layout and unified `runtime/` directories |
 | Phase 14.0 | Live stream service minimal loop |
 | Phase 14.5 | Stream stability, duplicate-start protection, TTL renewal, stale cleanup, reconnect/failure handling, stream metrics |
 | Phase 15 | Worker Capability Registry and capability-filtered health / readiness / workers / metrics |
-| Phase 16 | Engineering freeze: one-command start/check/regression/stop workflow, config templates, reports, and release-candidate baseline |
-| Phase 17.0 | CLS async image service, `ModelOutput` abstraction, top1/topk JSON, CLS registry/smoke/regression |
-| Phase 17.5 | Pose async image service, COCO17 keypoints/skeleton JSON, Pose registry/smoke, full regression over Phase 17 + Phase 16 |
+| Phase 16 | Engineering baseline: one-command start/check/regression/stop workflow, config templates, reports |
+| Phase 17.0 | CLS async image service, `ModelOutput` abstraction, top1/topk JSON |
+| Phase 17.5 | Pose async image service, COCO17 keypoints/skeleton JSON, full regression over Phase 17 + Phase 16 |
+| Phase 18.0 | Seg async image service, mask/polygon metadata, overlay result image, Seg registry/smoke/invalid-input tests |
+| Phase 18.5 | Seven-service validation and final engineering release-candidate baseline |
 
 ---
 
@@ -128,9 +98,9 @@ $env:PATH="D:\TensorRT-10.16.1.11\lib;D:\GPU13.3\bin;D:\libs\opencv\build\x64\vc
 
 ---
 
-## Dependencies
+## Install Dependencies
 
-Install third-party dependencies with vcpkg:
+Install C++ dependencies with vcpkg:
 
 ```bat
 cd /d D:\vcpkg
@@ -142,13 +112,19 @@ cd /d D:\vcpkg
 .\vcpkg.exe install spdlog:x64-windows --vcpkg-root D:\vcpkg
 ```
 
-Configure with vcpkg:
+Configure CMake with vcpkg:
 
-```bat
-cmake -S . -B out\build\x64-Debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=D:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows
+```powershell
+cd D:\tensorrtx\yolo11
+
+cmake -S . -B out\build\x64-Debug `
+  -G Ninja `
+  -DCMAKE_BUILD_TYPE=Debug `
+  -DCMAKE_TOOLCHAIN_FILE=D:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+  -DVCPKG_TARGET_TRIPLET=x64-windows
 ```
 
-If CUDA compiler detection fails, start a clean x64 Visual Studio environment first:
+If CUDA compiler detection fails, start a clean Visual Studio x64 environment first:
 
 ```powershell
 cmd /c "`"D:\vs2019\Common7\Tools\VsDevCmd.bat`" -arch=x64 -host_arch=x64 && set" |
@@ -172,20 +148,16 @@ yolo11/
 │   ├── yolo11_detector_api.cpp
 │   ├── yolo11_obb_api.cpp
 │   ├── yolo11_cls_api.cpp
-│   └── yolo11_pose_api.cpp
+│   ├── yolo11_pose_api.cpp
+│   └── yolo11_seg_api.cpp
 ├── config/
-│   ├── server_detect.yaml
-│   ├── worker_detect.yaml
-│   ├── server_obb.yaml
-│   ├── worker_obb.yaml
-│   ├── server_video.yaml
-│   ├── worker_video.yaml
-│   ├── server_stream.yaml
-│   ├── worker_stream.yaml
-│   ├── server_cls.yaml
-│   ├── worker_cls.yaml
-│   ├── server_pose.yaml
-│   ├── worker_pose.yaml
+│   ├── server_detect.yaml / worker_detect.yaml
+│   ├── server_obb.yaml    / worker_obb.yaml
+│   ├── server_video.yaml  / worker_video.yaml
+│   ├── server_stream.yaml / worker_stream.yaml
+│   ├── server_cls.yaml    / worker_cls.yaml
+│   ├── server_pose.yaml   / worker_pose.yaml
+│   ├── server_seg.yaml    / worker_seg.yaml
 │   ├── *.example.yaml
 │   └── archive/
 ├── labels/
@@ -194,39 +166,32 @@ yolo11/
 │   ├── imagenet.txt
 │   └── pose_coco.txt
 ├── include/
-│   ├── server/
-│   │   ├── model_output.h
-│   │   ├── model_runner.h
-│   │   ├── result_serializer.h
-│   │   └── ...
+│   ├── server/model_output.h
+│   ├── server/model_runner.h
+│   ├── server/result_serializer.h
 │   ├── yolo11_detector_api.h
 │   ├── yolo11_obb_api.h
 │   ├── yolo11_cls_api.h
-│   └── yolo11_pose_api.h
+│   ├── yolo11_pose_api.h
+│   └── yolo11_seg_api.h
 ├── src/server/
-├── runtime/
-│   ├── input/
-│   ├── output/
-│   ├── logs/
-│   └── pids/
 ├── scripts/
 │   ├── start_all.ps1
 │   ├── stop_all.ps1
 │   ├── check_all.ps1
-│   ├── start_cls.ps1
-│   ├── stop_cls.ps1
-│   ├── start_pose.ps1
-│   ├── stop_pose.ps1
+│   ├── start_cls.ps1 / stop_cls.ps1
+│   ├── start_pose.ps1 / stop_pose.ps1
+│   ├── start_seg.ps1 / stop_seg.ps1
 │   └── clean_runtime.ps1
 ├── tools/
 │   ├── run_full_regression.py
 │   ├── run_phase17_regression.py
 │   ├── run_phase17_5_regression.py
-│   ├── phase17_cls_registry_test.py
-│   ├── phase17_cls_smoke_test.py
-│   ├── phase17_5_pose_registry_test.py
-│   ├── phase17_5_pose_smoke_test.py
-│   └── ...
+│   ├── run_phase18_regression.py
+│   ├── phase18_seg_registry_test.py
+│   ├── phase18_seg_smoke_test.py
+│   └── phase18_seg_invalid_input_test.py
+├── runtime/
 ├── reports/
 ├── engines/
 ├── images/
@@ -257,7 +222,7 @@ reports/
 
 ## Build
 
-Use a Visual Studio x64 command environment, then build the required targets:
+Build all required targets:
 
 ```powershell
 cd D:\tensorrtx\yolo11
@@ -267,6 +232,7 @@ cmake --build out\build\x64-Debug --target yolo11_det --parallel 8
 cmake --build out\build\x64-Debug --target yolo11_obb --parallel 8
 cmake --build out\build\x64-Debug --target yolo11_cls --parallel 8
 cmake --build out\build\x64-Debug --target yolo11_pose --parallel 8
+cmake --build out\build\x64-Debug --target yolo11_seg --parallel 8
 cmake --build out\build\x64-Debug --target yolo11_server --parallel 8
 cmake --build out\build\x64-Debug --target yolo11_worker --parallel 8
 cmake --build out\build\x64-Debug --target yolo11_video_worker --parallel 8
@@ -285,7 +251,7 @@ Confirm executables:
 Get-ChildItem out\build\x64-Debug -Filter "*.exe"
 ```
 
-`myplugins.dll` must be in the same directory as the executables. The CMake configuration should copy it automatically.
+`myplugins.dll` must be in the same directory as the executables. The current CMake configuration should copy it automatically.
 
 ---
 
@@ -303,11 +269,6 @@ Verify Redis from Windows:
 
 ```powershell
 Test-NetConnection 172.19.196.109 -Port 6379
-```
-
-If Windows PowerShell cannot find `redis-cli`, use WSL explicitly:
-
-```powershell
 wsl -d Ubuntu -- redis-cli -h 172.19.196.109 -p 6379 ping
 ```
 
@@ -317,66 +278,81 @@ Expected:
 PONG
 ```
 
-If Docker Desktop is the default WSL distro, always pass `-WslDistro Ubuntu` to the Phase 16 check script.
+If WSL IP changes, update `redis.host` in all active `config/server_*.yaml` and `config/worker_*.yaml` files.
 
 ---
 
 ## Model Engines
 
-Default configs expect these engine files:
+Default active configs expect these engine files:
 
 ```text
 engines/yolo11n.engine
 engines/yolo11n-obb.engine
 engines/yolo11n-cls.engine
 engines/yolo11n-pose.engine
+engines/yolo11n-seg.engine
 ```
 
-Generate CLS engine if needed:
+Generate engine files from `.wts` files when needed:
 
 ```powershell
+# Detect
+python gen_wts.py -w .\weights\yolo11n.pt -t detect -o .\engines\yolo11n.wts
+.\out\build\x64-Debug\yolo11_det.exe -s .\engines\yolo11n.wts .\engines\yolo11n.engine n
+
+# OBB
+python gen_wts.py -w .\weights\yolo11n-obb.pt -t obb -o .\engines\yolo11n-obb.wts
+.\out\build\x64-Debug\yolo11_obb.exe -s .\engines\yolo11n-obb.wts .\engines\yolo11n-obb.engine n
+
+# CLS
 python gen_wts.py -w .\weights\yolo11n-cls.pt -t cls -o .\engines\yolo11n-cls.wts
 .\out\build\x64-Debug\yolo11_cls.exe -s .\engines\yolo11n-cls.wts .\engines\yolo11n-cls.engine n
-```
 
-Generate Pose engine if needed:
-
-```powershell
+# Pose
 python gen_wts.py -w .\weights\yolo11n-pose.pt -t pose -o .\engines\yolo11n-pose.wts
 .\out\build\x64-Debug\yolo11_pose.exe -s .\engines\yolo11n-pose.wts .\engines\yolo11n-pose.engine n
+
+# Seg
+python gen_wts.py -w .\weights\yolo11n-seg.pt -t seg -o .\engines\yolo11n-seg.wts
+.\out\build\x64-Debug\yolo11_seg.exe -s .\engines\yolo11n-seg.wts .\engines\yolo11n-seg.engine n
 ```
 
 After changing class count, model structure, TensorRT version, CUDA version, or GPU architecture, rebuild the project and regenerate the TensorRT engine. Do not reuse an incompatible `.engine` file.
 
 ---
 
-## Quick Start: Phase 16 Core Services
+## Quick Start: Seven-Service Release Candidate
 
-### 1. Start Detect / OBB / Video / Stream
+### 1. Start all services
 
 ```powershell
 cd D:\tensorrtx\yolo11
 
-powershell -ExecutionPolicy Bypass -File .\scripts\start_all.ps1 -ExeDir .\out\build\x64-Debug
+powershell -ExecutionPolicy Bypass `
+  -File .\scripts\start_all.ps1 `
+  -ExeDir .\out\build\x64-Debug
 ```
 
-This starts eight processes:
+This starts 14 processes: seven workers and seven HTTP servers.
 
 ```text
-worker_detect        -> yolo11_worker.exe config\worker_detect.yaml --consumer-name worker_1
-worker_obb           -> yolo11_worker.exe config\worker_obb.yaml --consumer-name obb_worker_1
-worker_video         -> yolo11_video_worker.exe config\worker_video.yaml --consumer-name video_worker_1
-worker_stream        -> yolo11_stream_worker.exe config\worker_stream.yaml --consumer-name stream_worker_1
-server_detect_8080   -> yolo11_server.exe config\server_detect.yaml
-server_obb_8081      -> yolo11_server.exe config\server_obb.yaml
-server_video_8082    -> yolo11_server.exe config\server_video.yaml
-server_stream_8083   -> yolo11_server.exe config\server_stream.yaml
+Workers:
+worker_1, obb_worker_1, video_worker_1, stream_worker_1,
+cls_worker_1, pose_worker_1, seg_worker_1
+
+Servers:
+8080 detect, 8081 obb, 8082 video, 8083 stream,
+8084 cls, 8085 pose, 8086 seg
 ```
 
-### 2. Check all core services
+### 2. Check all services
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\check_all.ps1 -UseWslRedisCli -WslDistro Ubuntu
+powershell -ExecutionPolicy Bypass `
+  -File .\scripts\check_all.ps1 `
+  -UseWslRedisCli `
+  -WslDistro Ubuntu
 ```
 
 Expected:
@@ -385,51 +361,67 @@ Expected:
 PASS: all services are ready and Redis pending looks clean.
 ```
 
-### 3. Run Phase 16 full regression
+The check must show `health=True`, `ready=True`, `workers=1`, `metrics=True`, and `pending=0` for all seven services.
+
+### 3. Run Phase 18 full regression
 
 ```powershell
-python tools\run_full_regression.py
+python .\tools\run_phase18_regression.py
 ```
 
 Expected:
 
 ```text
-Phase 16 Full Regression Summary
-success=True
+Phase 18 Regression Summary: success=True
+[PASS] 01_phase18_seg_registry
+[PASS] 02_phase18_seg_smoke
+[PASS] 03_phase18_seg_invalid_input
+[PASS] 04_phase17_5_regression
 ```
 
-### 4. Stop core services
+The Phase 17.5 regression includes Pose, CLS, and the Phase 16 full regression for Detect / OBB / Video / Stream.
+
+### 4. Stop all services
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\stop_all.ps1
+powershell -ExecutionPolicy Bypass `
+  -File .\scripts\stop_all.ps1 `
+  -KillByPort
 ```
 
-Fallback cleanup:
+Confirm ports are released:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\stop_all.ps1 -KillByName -KillByPort
+netstat -ano | findstr ":8080"
+netstat -ano | findstr ":8081"
+netstat -ano | findstr ":8082"
+netstat -ano | findstr ":8083"
+netstat -ano | findstr ":8084"
+netstat -ano | findstr ":8085"
+netstat -ano | findstr ":8086"
 ```
 
 ---
 
-## Quick Start: CLS Service
+## Single-Service Smoke Tests
 
-Start CLS service:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\start_cls.ps1 -ExeDir .\out\build\x64-Debug
-```
-
-Check:
+### Detect image
 
 ```powershell
-curl.exe "http://127.0.0.1:8084/api/v1/health"
-curl.exe "http://127.0.0.1:8084/api/v1/ready?model=cls&task_kind=image_async&worker_group=image_cls_gpu0"
-curl.exe "http://127.0.0.1:8084/api/v1/workers?model=cls"
-curl.exe "http://127.0.0.1:8084/api/v1/metrics?model=cls"
+curl.exe -X POST "http://127.0.0.1:8080/api/v1/detect/image/async" `
+  -H "Content-Type: image/png" `
+  --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
 ```
 
-Submit a CLS task:
+### OBB image
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8081/api/v1/detect/obb/async" `
+  -H "Content-Type: image/jpeg" `
+  --data-binary "@D:/tensorrtx/yolo11/images/a.jpg"
+```
+
+### CLS image
 
 ```powershell
 curl.exe -X POST "http://127.0.0.1:8084/api/v1/classify/image/async" `
@@ -437,48 +429,7 @@ curl.exe -X POST "http://127.0.0.1:8084/api/v1/classify/image/async" `
   --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
 ```
 
-Query result:
-
-```powershell
-$task_id = "replace_with_actual_task_id"
-curl.exe "http://127.0.0.1:8084/api/v1/result/$task_id"
-curl.exe "http://127.0.0.1:8084/api/v1/result/$task_id/image" --output cls_result.jpg
-```
-
-Run CLS tests:
-
-```powershell
-python tools\phase17_cls_registry_test.py --url http://127.0.0.1:8084
-python tools\phase17_cls_smoke_test.py --url http://127.0.0.1:8084 --image .\images\bus.png
-python tools\run_phase17_regression.py --skip-phase16
-```
-
-Stop CLS service:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\stop_cls.ps1
-```
-
----
-
-## Quick Start: Pose Service
-
-Start Pose service:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\start_pose.ps1 -ExeDir .\out\build\x64-Debug
-```
-
-Check:
-
-```powershell
-curl.exe "http://127.0.0.1:8085/api/v1/health"
-curl.exe "http://127.0.0.1:8085/api/v1/ready?model=pose&task_kind=image_async&worker_group=image_pose_gpu0"
-curl.exe "http://127.0.0.1:8085/api/v1/workers?model=pose"
-curl.exe "http://127.0.0.1:8085/api/v1/metrics?model=pose"
-```
-
-Submit a Pose task:
+### Pose image
 
 ```powershell
 curl.exe -X POST "http://127.0.0.1:8085/api/v1/pose/image/async" `
@@ -486,91 +437,73 @@ curl.exe -X POST "http://127.0.0.1:8085/api/v1/pose/image/async" `
   --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
 ```
 
-Query result:
+### Seg image
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8086/api/v1/segment/image/async" `
+  -H "Content-Type: image/png" `
+  --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+```
+
+A compatible alias may also be available:
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8086/api/v1/detect/seg/async" `
+  -H "Content-Type: image/png" `
+  --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+```
+
+Query any image task result:
 
 ```powershell
 $task_id = "replace_with_actual_task_id"
-curl.exe "http://127.0.0.1:8085/api/v1/result/$task_id"
-curl.exe "http://127.0.0.1:8085/api/v1/result/$task_id/image" --output pose_result.jpg
+curl.exe "http://127.0.0.1:<port>/api/v1/result/$task_id"
+curl.exe "http://127.0.0.1:<port>/api/v1/result/$task_id/image" --output result.jpg
 ```
 
-Run Pose tests:
+### Video file detect
 
 ```powershell
-python tools\phase17_5_pose_registry_test.py --url http://127.0.0.1:8085
-python tools\phase17_5_pose_smoke_test.py --url http://127.0.0.1:8085 --image .\images\bus.png
-python tools\run_phase17_5_regression.py --skip-phase17
+curl.exe -X POST "http://127.0.0.1:8082/api/v1/detect/video/async" `
+  -H "Content-Type: video/mp4" `
+  --data-binary "@D:/tensorrtx/yolo11/videos/test.mp4"
+
+curl.exe "http://127.0.0.1:8082/api/v1/video/result/<task_id>"
+curl.exe "http://127.0.0.1:8082/api/v1/video/result/<task_id>/file" --output result_video.mp4
 ```
 
-Stop Pose service:
+### Live stream detect
+
+Use a JSON file to avoid PowerShell quote issues:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\stop_pose.ps1
+@'
+{
+  "source_type": "camera",
+  "camera_id": 0
+}
+'@ | Set-Content -Encoding utf8 .\stream_start_camera.json
+
+curl.exe -X POST "http://127.0.0.1:8083/api/v1/stream/start" `
+  -H "Content-Type: application/json" `
+  --data-binary "@stream_start_camera.json"
+
+curl.exe "http://127.0.0.1:8083/api/v1/stream/<stream_id>/status"
+curl.exe "http://127.0.0.1:8083/api/v1/stream/<stream_id>/snapshot" --output stream_snapshot.jpg
+curl.exe -X POST "http://127.0.0.1:8083/api/v1/stream/<stream_id>/stop"
 ```
 
 ---
 
-## Full Phase 17.5 Regression
+## Observation APIs
 
-Start all services:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\start_all.ps1 -ExeDir .\out\build\x64-Debug
-powershell -ExecutionPolicy Bypass -File .\scripts\start_cls.ps1 -ExeDir .\out\build\x64-Debug
-powershell -ExecutionPolicy Bypass -File .\scripts\start_pose.ps1 -ExeDir .\out\build\x64-Debug
-```
-
-Run full regression:
+Each service exposes:
 
 ```powershell
-python tools\run_phase17_5_regression.py
-```
-
-Expected final output:
-
-```text
-Phase 17.5 Regression Summary: success=True
-[PASS] 01_phase17_5_pose_registry
-[PASS] 02_phase17_5_pose_smoke
-[PASS] 03_phase17_cls_regression
-```
-
-The Phase 17 CLS regression also runs Phase 16 full regression, so this validates:
-
-```text
-Detect / OBB / Video / Stream / CLS / Pose
-```
-
-Stop all services:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\stop_pose.ps1
-powershell -ExecutionPolicy Bypass -File .\scripts\stop_cls.ps1
-powershell -ExecutionPolicy Bypass -File .\scripts\stop_all.ps1
-```
-
----
-
-## Health and Metrics APIs
-
-Each service exposes the same observation endpoints:
-
-```powershell
-curl.exe "http://127.0.0.1:8080/api/v1/health"
-curl.exe "http://127.0.0.1:8080/api/v1/ready"
-curl.exe "http://127.0.0.1:8080/api/v1/workers"
-curl.exe "http://127.0.0.1:8080/api/v1/metrics"
-```
-
-Use ports:
-
-```text
-8080 detect
-8081 obb
-8082 video
-8083 stream
-8084 cls
-8085 pose
+curl.exe "http://127.0.0.1:<port>/api/v1/health"
+curl.exe "http://127.0.0.1:<port>/api/v1/ready"
+curl.exe "http://127.0.0.1:<port>/api/v1/workers"
+curl.exe "http://127.0.0.1:<port>/api/v1/metrics"
 ```
 
 Expected key fields:
@@ -593,11 +526,12 @@ curl.exe "http://127.0.0.1:8082/api/v1/workers?model=video&task_kind=video_file"
 curl.exe "http://127.0.0.1:8083/api/v1/workers?model=stream&task_kind=live_stream"
 curl.exe "http://127.0.0.1:8084/api/v1/workers?model=cls&task_kind=image_async"
 curl.exe "http://127.0.0.1:8085/api/v1/workers?model=pose&task_kind=image_async"
+curl.exe "http://127.0.0.1:8086/api/v1/workers?model=seg&task_kind=image_async"
 ```
 
 ---
 
-## HTTP APIs
+## HTTP API Reference
 
 | Method | Endpoint | Service | Description |
 |---|---|---|---|
@@ -609,8 +543,10 @@ curl.exe "http://127.0.0.1:8085/api/v1/workers?model=pose&task_kind=image_async"
 | POST | `/api/v1/detect/obb/async` | OBB | Submit async OBB image task |
 | POST | `/api/v1/classify/image/async` | CLS | Submit async image classification task |
 | POST | `/api/v1/pose/image/async` | Pose | Submit async image pose-estimation task |
-| GET | `/api/v1/result/{task_id}` | Detect / OBB / CLS / Pose | Query image task result |
-| GET | `/api/v1/result/{task_id}/image` | Detect / OBB / CLS / Pose | Download result image |
+| POST | `/api/v1/segment/image/async` | Seg | Submit async image segmentation task |
+| POST | `/api/v1/detect/seg/async` | Seg | Compatible Seg async image endpoint |
+| GET | `/api/v1/result/{task_id}` | Image services | Query image task result |
+| GET | `/api/v1/result/{task_id}/image` | Image services | Download result image |
 | POST | `/api/v1/detect/video/async` | Video | Submit async video detection task |
 | GET | `/api/v1/video/result/{task_id}` | Video | Query video progress/result |
 | GET | `/api/v1/video/result/{task_id}/file` | Video | Download result video |
@@ -623,7 +559,7 @@ curl.exe "http://127.0.0.1:8085/api/v1/workers?model=pose&task_kind=image_async"
 
 ---
 
-## API Result Formats
+## Result Format Examples
 
 ### CLS result
 
@@ -636,23 +572,20 @@ curl.exe "http://127.0.0.1:8085/api/v1/workers?model=pose&task_kind=image_async"
   "top1": {
     "class_id": 608,
     "class_name": "class_608",
-    "confidence": 0.2945369780063629
+    "confidence": 0.2945
   },
   "topk": [
     {
       "rank": 1,
       "class_id": 608,
       "class_name": "class_608",
-      "confidence": 0.2945369780063629
+      "confidence": 0.2945
     }
-  ],
-  "queue_wait_ms": 2,
-  "inference_ms": 13.2195,
-  "total_ms": 30
+  ]
 }
 ```
 
-`labels/imagenet.txt` currently may contain placeholder labels such as `class_0` to `class_999`. Replace it with a real ImageNet label file for production.
+`labels/imagenet.txt` may contain placeholder labels such as `class_0` to `class_999`. Replace it with a real ImageNet label file for production.
 
 ### Pose result
 
@@ -669,23 +602,10 @@ curl.exe "http://127.0.0.1:8085/api/v1/workers?model=pose&task_kind=image_async"
     {
       "class_id": 0,
       "class_name": "person",
-      "confidence": 0.9124361872673035,
-      "bbox": {
-        "x": 255,
-        "y": 61,
-        "w": 75,
-        "h": 202
-      },
+      "confidence": 0.9124,
+      "bbox": { "x": 255, "y": 61, "w": 75, "h": 202 },
       "keypoints": [
-        {
-          "id": 0,
-          "name": "nose",
-          "x": 289.95,
-          "y": 79.12,
-          "confidence": 0.9887,
-          "visible": true,
-          "in_image": true
-        }
+        { "id": 0, "name": "nose", "x": 289.95, "y": 79.12, "confidence": 0.9887, "visible": true }
       ],
       "valid_keypoints": 16
     }
@@ -693,7 +613,39 @@ curl.exe "http://127.0.0.1:8085/api/v1/workers?model=pose&task_kind=image_async"
 }
 ```
 
-Pose coordinates are mapped back to original image pixels.
+### Seg result
+
+```json
+{
+  "success": true,
+  "status": "done",
+  "model_type": "seg",
+  "segmentation_coordinate_system": "original_image_pixels",
+  "segmentation_format": "bbox_polygon_mask_metadata",
+  "mask_format": "thresholded_polygon_metadata",
+  "num_segmentations": 3,
+  "segmentations": [
+    {
+      "class_id": 0,
+      "class_name": "person",
+      "confidence": 0.8921,
+      "bbox": { "x": 254, "y": 60, "w": 75, "h": 203, "x1": 254, "y1": 60, "x2": 329, "y2": 263 },
+      "mask": {
+        "coordinate_system": "original_image_pixels",
+        "threshold": 0.5,
+        "area_pixels": 7418,
+        "has_polygon": true,
+        "bbox": { "x1": 254, "y1": 58, "x2": 330, "y2": 264 },
+        "polygon": [[275, 58], [254, 132], [274, 200]],
+        "polygons": [[[275, 58], [254, 132], [274, 200]]]
+      }
+    }
+  ],
+  "result_image_url": "/api/v1/result/seg_xxx/image"
+}
+```
+
+Seg first-stage service returns bbox + polygon/mask metadata and an overlay result image. It does not return full raw mask matrices in JSON.
 
 ---
 
@@ -706,45 +658,13 @@ wsl -d Ubuntu -- redis-cli -h 172.19.196.109 -p 6379 XPENDING yolo:stream:video:
 wsl -d Ubuntu -- redis-cli -h 172.19.196.109 -p 6379 XPENDING yolo:stream:live:detect yolo11_stream_detect_group
 wsl -d Ubuntu -- redis-cli -h 172.19.196.109 -p 6379 XPENDING yolo:stream:cls yolo11_cls_group
 wsl -d Ubuntu -- redis-cli -h 172.19.196.109 -p 6379 XPENDING yolo:stream:pose yolo11_pose_group
+wsl -d Ubuntu -- redis-cli -h 172.19.196.109 -p 6379 XPENDING yolo:stream:seg yolo11_seg_group
 ```
 
 Expected after a clean validation run:
 
 ```text
-XPENDING = 0 for Detect / OBB / Video / Stream / CLS / Pose
-```
-
----
-
-## Model and Label Notes
-
-Low-level TensorRT class count is configured in:
-
-```text
-include/config.h
-```
-
-Typical values:
-
-```cpp
-const static int kNumClass = 80;          // COCO Detect
-constexpr static int kObbNumClass = 15;  // DOTA OBB labels used by this project
-```
-
-HTTP JSON class names are loaded from `labels_path`:
-
-```yaml
-model:
-  labels_path: "./labels/coco.txt"      # detect / video / stream
-  labels_path: "./labels/dota.txt"      # obb
-  labels_path: "./labels/imagenet.txt"  # cls
-  labels_path: "./labels/pose_coco.txt" # pose
-```
-
-Pose usually uses a single class label:
-
-```text
-person
+XPENDING = 0 for Detect / OBB / Video / Stream / CLS / Pose / Seg
 ```
 
 ---
@@ -753,22 +673,10 @@ person
 
 ### `check_all.ps1` cannot find `redis-cli`
 
-PowerShell may not have Redis CLI installed. Use WSL mode:
+Use WSL mode:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\check_all.ps1 -UseWslRedisCli -WslDistro Ubuntu
-```
-
-If `wsl redis-cli` enters Docker Desktop instead of Ubuntu, check distro names:
-
-```powershell
-wsl -l -v
-```
-
-Then use:
-
-```powershell
-wsl -d Ubuntu -- redis-cli -h 172.19.196.109 -p 6379 ping
 ```
 
 ### WSL prints a localhost proxy warning
@@ -784,33 +692,42 @@ It is not a Redis failure if the command still returns `PONG` or `XPENDING=0`.
 ### Port already in use
 
 ```powershell
-netstat -ano | findstr ":8080"
-netstat -ano | findstr ":8081"
-netstat -ano | findstr ":8082"
-netstat -ano | findstr ":8083"
-netstat -ano | findstr ":8084"
-netstat -ano | findstr ":8085"
+netstat -ano | findstr ":8086"
+taskkill /PID <PID> /F
 ```
 
-Fallback cleanup:
+Or use the project cleanup script:
 
 ```powershell
-Get-Process yolo11_server,yolo11_worker,yolo11_video_worker,yolo11_stream_worker -ErrorAction SilentlyContinue | Stop-Process -Force
+powershell -ExecutionPolicy Bypass -File .\scripts\stop_all.ps1 -KillByPort
 ```
 
 ### `Cannot open engine file`
 
-Check `engine_path` in the relevant server/worker YAML. For local development, absolute paths are often safer.
+Check the active YAML file and confirm the engine exists:
+
+```powershell
+Test-Path .\engines\yolo11n-seg.engine
+Get-Content .\config\worker_seg.yaml
+```
 
 ### `labels_loaded=false`
 
 Check the configured labels file:
 
 ```powershell
-Test-Path D:\tensorrtx\yolo11\labels\coco.txt
-Test-Path D:\tensorrtx\yolo11\labels\dota.txt
-Test-Path D:\tensorrtx\yolo11\labels\imagenet.txt
-Test-Path D:\tensorrtx\yolo11\labels\pose_coco.txt
+Test-Path .\labels\coco.txt
+Test-Path .\labels\dota.txt
+Test-Path .\labels\imagenet.txt
+Test-Path .\labels\pose_coco.txt
+```
+
+### `model.type=seg` is rejected by server or worker
+
+Make sure the Phase 18 code was built. `src/server/main_server.cpp` and `src/server/main_worker.cpp` must allow `model.type=seg`, and `yolo11_server.exe` / `yolo11_worker.exe` must be rebuilt:
+
+```powershell
+cmake --build .\out\build\x64-Debug --target yolo11_server yolo11_worker --config Debug
 ```
 
 ### CLS returns `class_608`
@@ -819,7 +736,7 @@ That means the service is using placeholder ImageNet labels. Replace `labels/ima
 
 ### Pose GPU postprocess
 
-Pose service currently uses CPU post-processing because the original pose GPU postprocess path is not supported in this project. This is expected for Phase 17.5.
+Pose service currently uses CPU post-processing because the original pose GPU postprocess path is not supported in this project. This is expected for the current service baseline.
 
 ### Video `processed_frames` is lower than `total_frames`
 
@@ -833,18 +750,18 @@ Use a JSON file and `--data-binary` instead of inline JSON in PowerShell.
 
 ## Release Tagging
 
-After Phase 17.5 passes:
+After Phase 18 validation passes:
 
 ```powershell
 git add .
-git commit -m "phase17.5 add pose image async service and full regression pass"
-git tag phase17_5_pose_pass
+git commit -m "phase18 add seg image async service and seven-service regression pass"
+git tag phase18_5_final_engineering_freeze
 ```
 
 Archive:
 
 ```powershell
-Compress-Archive -Path D:\tensorrtx\yolo11\* -DestinationPath D:\tensorrtx\yolo11_phase17_5_pose_pass.zip
+Compress-Archive -Path D:\tensorrtx\yolo11\* -DestinationPath D:\tensorrtx\yolo11_phase18_5_final_engineering_freeze.zip
 ```
 
 ---
@@ -854,24 +771,16 @@ Compress-Archive -Path D:\tensorrtx\yolo11\* -DestinationPath D:\tensorrtx\yolo1
 Current baseline:
 
 ```text
-Phase 17.5: CLS + Pose async image services passed with full regression.
+Phase 18.5: Detect / OBB / CLS / Pose / Seg image services, Video file service, Stream service, and seven-service regression passed.
 ```
 
-Recommended next phase:
+Recommended next stage:
 
 ```text
-Phase 18.0: Seg async image service
+Phase 19+: Real-world scenario research, dataset construction, visual post-processing, algorithm improvement, and deployment trade-off studies.
 ```
 
-Planned final engineering steps before full freeze:
-
-```text
-Phase 18.0: Seg image async service
-Phase 18.5: Five-model stability regression and engineering freeze
-Phase 19+: Real-world scenario research, dataset work, visual post-processing, and algorithm improvement
-```
-
-Out of scope before the final freeze unless a real scenario requires them:
+Do not expand the platform before the first real scenario requires it. The following should remain out of scope unless a concrete project needs them:
 
 ```text
 Multi-GPU automatic scheduler
