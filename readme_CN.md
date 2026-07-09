@@ -1,6 +1,6 @@
 # YOLO11 TensorRT Windows
 
-本项目用于在 Windows 平台部署 YOLO11 TensorRT 推理，支持 Visual Studio 2019、CUDA、TensorRT 10、OpenCV、可复用 C++ Runtime API、纯 C++ HTTP 图片检测服务、Redis Stream 异步任务队列、Server / Worker 独立进程部署。当前项目已经推进到 Phase 17.5，已在 Phase 16 工程封板基线上继续接入 YOLO11 Classification 图片异步服务和 YOLO11 Pose 图片异步服务。当前系统已经支持 Detection 图片异步服务、OBB 图片异步服务、CLS 图片异步服务、POSE 图片异步服务、Detect 视频文件异步检测服务、单路 RTSP / 摄像头 / 本地文件流任务服务化，以及 Detect / OBB / Video / Stream / CLS / Pose 六类 Worker 的能力注册与统一观测。项目已经具备 Worker 心跳、ready 检查、Redis Binary 图片存储、视频本地文件存储、流任务状态管理、最新帧 snapshot 输出、TTL 清理、Pending 恢复、日志、labels_path、metrics、多模型 Runner 抽象、ModelOutput 统一输出抽象、视频任务进度、取消、异常输入拒绝、Worker 恢复、重复启动保护、流任务重连失败处理、批量压测、统一 runtime 目录管理，以及 `model_type / runner_model_type / worker_group / worker_kind / task_kind / stream_type / gpu_id` 等 Worker capability 字段。
+本项目用于在 Windows 平台部署 YOLO11 TensorRT 推理，支持 Visual Studio 2019、CUDA、TensorRT 10、OpenCV、可复用 C++ Runtime API、纯 C++ HTTP 图片检测服务、Redis Stream 异步任务队列、Server / Worker 独立进程部署。当前项目已经推进到 Phase 18 / 18.5，已在 Phase 16 工程封板基线和 Phase 17 / 17.5 CLS、POSE 服务化基础上继续接入 YOLO11 Segmentation 图片异步服务。当前系统已经支持 Detection 图片异步服务、OBB 图片异步服务、CLS 图片异步服务、POSE 图片异步服务、SEG 图片异步服务、Detect 视频文件异步检测服务、单路 RTSP / 摄像头 / 本地文件流任务服务化，以及 Detect / OBB / Video / Stream / CLS / Pose / Seg 七类 Worker 的能力注册与统一观测。项目已经具备 Worker 心跳、ready 检查、Redis Binary 图片存储、视频本地文件存储、流任务状态管理、最新帧 snapshot 输出、TTL 清理、Pending 恢复、日志、labels_path、metrics、多模型 Runner 抽象、ModelOutput 统一输出抽象、视频任务进度、取消、异常输入拒绝、Worker 恢复、重复启动保护、流任务重连失败处理、批量压测、统一 runtime 目录管理，以及 `model_type / runner_model_type / worker_group / worker_kind / task_kind / stream_type / gpu_id` 等 Worker capability 字段。
 
 这个 README 中文版主要用于记录项目演进过程、踩坑原因、修改逻辑和阶段性反思。
 
@@ -9,9 +9,10 @@
 当前项目已经完成：
 
 ```text
-Phase 17.5：POSE 图片异步服务接入与全量回归通过
+Phase 18 / 18.5：SEG 图片异步服务接入、七服务全量回归通过与最终工程封板候选
 ```
 
+最终补充说明：当前 Phase 18 已完成 SEG 图片异步服务接入，并在 Detect / OBB / CLS / POSE 四类图片异步服务、Video 文件异步服务和 Stream 实时流服务基础上通过七服务统一检查与全量回归。SEG 服务独立运行于 8086 端口，使用 `yolo:stream:seg` 和 `yolo11_seg_group`，Worker 为 `seg_worker_1`，支持 `POST /api/v1/segment/image/async`、`GET /api/v1/result/{task_id}` 和 `GET /api/v1/result/{task_id}/image`。结果 JSON 返回 `bbox + polygon + mask metadata`，结果图返回 overlay 图，不把完整 mask 矩阵直接塞进 JSON。最终验收中，七服务 `health=true`、`ready=true`、`workers=1`、`metrics=true`，七条 Redis Stream 的 `XPENDING=0`，`run_phase18_regression.py` 最终 `Phase 18 Regression Summary: success=True`。
 
 最终补充说明：当前 Phase 17.5 已完成 POSE 图片异步服务接入，并在 Phase 17 CLS 图片异步服务基础上通过了完整回归。当前系统已经形成 Detect / OBB / CLS / POSE 四类图片异步服务，加上 Video 文件异步服务和 Stream 实时流服务。Phase 17.5 最终验收中，POSE 服务 `health=true`、`ready=true`、`workers=1`、`metrics=true`，`/api/v1/pose/image/async` 可返回 `bbox + COCO17 keypoints + skeleton`，Redis `XPENDING yolo:stream:pose yolo11_pose_group = 0`，POSE metrics 显示 `total_done=3`、`total_failed=0`。随后执行 `run_phase17_5_regression.py`，串联 POSE、CLS 与 Phase 16 Detect / OBB / Video / Stream 全量回归，最终 `Phase 17.5 Regression Summary: success=True`。
 
@@ -161,11 +162,20 @@ Phase 17.5：POSE 图片异步服务接入与全量回归通过
 - Phase 17.5 POSE metrics 验收：`metrics_found=true`，`total_tasks=3`，`total_tasks_done=3`，`total_tasks_failed=0`，`worker_distribution.pose_worker_1=3`
 - Phase 17.5 Redis 验收：`XPENDING yolo:stream:pose yolo11_pose_group = 0`
 - Phase 17.5 全量回归验收：`run_phase17_5_regression.py` 同时跑通 POSE registry/smoke、CLS 回归和 Phase 16 Full Regression，最终 `Phase 17.5 Regression Summary: success=True`
+- Phase 18.0 SEG API 封装：新增 `Yolo11SegDetector`，复用原始 `yolo11_seg.cpp` 的 TensorRT segmentation 推理逻辑，并服务化为 Runtime API
+- Phase 18.0 SEG Runner：新增 `SegModelRunner`，接入 `IModelRunner` 工厂体系，支持 `model.type=seg`
+- Phase 18.0 SEG 序列化：结果 JSON 返回 `bbox`、`mask`、`polygon`、`polygons`、`area_pixels`、`segmentation_format=bbox_polygon_mask_metadata`、`mask_format=thresholded_polygon_metadata`
+- Phase 18.0 SEG 独立配置：新增 `config/server_seg.yaml`、`config/worker_seg.yaml`，服务端口 8086，Redis Stream 为 `yolo:stream:seg`，Consumer Group 为 `yolo11_seg_group`
+- Phase 18.0 SEG 独立脚本：新增 `scripts/start_seg.ps1` 与 `scripts/stop_seg.ps1`
+- Phase 18.0 SEG 自动测试：新增 `tools/phase18_seg_registry_test.py`、`tools/phase18_seg_smoke_test.py`、`tools/phase18_seg_invalid_input_test.py`、`tools/run_phase18_regression.py`
+- Phase 18.0 SEG 单项验收：`/health`、`/ready`、`/workers`、`/metrics` 正常，`POST /api/v1/segment/image/async` 返回 queued，结果查询返回 done + 3 个 person segmentation，结果图可下载
+- Phase 18.0 SEG metrics 验收：`metrics_found=true`，`total_done=3+`，`total_failed=0`，`worker_distribution.seg_worker_1` 正常增长
+- Phase 18.0 Redis 验收：`XPENDING yolo:stream:seg yolo11_seg_group = 0`
+- Phase 18.5 七服务全量回归验收：`start_all.ps1` 启动 14 个进程，`check_all.ps1` 检查 Detect / OBB / Video / Stream / CLS / POSE / SEG 全部 ready，`run_phase18_regression.py` 最终 `Phase 18 Regression Summary: success=True`
 
 
 当前还没有做：
 
-- Segmentation 图片异步服务接入
 - 多路 RTSP / 摄像头并发流管理
 - WebSocket / SSE 实时推送检测结果
 - 多 GPU / 多模型 Worker 调度
@@ -173,7 +183,7 @@ Phase 17.5：POSE 图片异步服务接入与全量回归通过
 - Prometheus 指标、服务守护、Docker / Linux 部署路径
 - 更严格的长视频压测、磁盘空间保护和历史任务清理策略
 
-当前开发原则是：**Detect 图片、OBB 图片、Detect 视频文件异步服务和单路流任务服务已经形成稳定基础；下一阶段进入 SEG 图片异步服务之前，优先保证 Detect / OBB / CLS / POSE / Video / Stream 六类服务的配置、目录、脚本、Redis 状态和测试入口足够清晰，避免服务类型增多后工程结构失控。**
+当前开发原则是：**Detect / OBB / CLS / POSE / SEG 五类图片异步服务，加上 Video 文件异步服务和 Stream 单路实时流服务，已经形成当前工程主线的完整封板候选版本；后续不再继续无边界扩张平台功能，而应优先进入真实场景、数据集、算法效果、视觉后处理和部署权衡研究。**
 
 ---
 
@@ -191,6 +201,7 @@ Phase 17.5：POSE 图片异步服务接入与全量回归通过
   - `Yolo11ObbDetector`
   - `Yolo11ClsDetector`
   - `Yolo11PoseDetector`
+  - `Yolo11SegDetector`
 - 保留原始命令行 demo，不破坏原项目验证路径
 - 新增纯 C++ HTTP Server 模块
   - `yolo11_server.exe`
@@ -224,7 +235,9 @@ Phase 17.5：POSE 图片异步服务接入与全量回归通过
   - Phase 17 ModelOutput 最小抽象：支持分类 top1/topk 与姿态 bbox/keypoints/skeleton 等非检测框结构
   - Phase 17 CLS 图片异步服务：`POST /api/v1/classify/image/async`，独立 8084 端口、独立 Redis Stream、独立 Worker
   - Phase 17.5 POSE 图片异步服务：`POST /api/v1/pose/image/async`，独立 8085 端口、独立 Redis Stream、独立 Worker
-  - Phase 17 / 17.5 `/workers`、`/ready`、`/metrics` 支持 `model=cls` 与 `model=pose` 过滤
+  - Phase 18 SEG 图片异步服务：`POST /api/v1/segment/image/async`，独立 8086 端口、独立 Redis Stream、独立 Worker
+  - Phase 18 SEG 结果 JSON：返回 bbox + polygon + mask metadata，结果图优先返回 overlay，不直接返回完整 mask 矩阵
+  - Phase 17 / 17.5 / 18 `/workers`、`/ready`、`/metrics` 支持 `model=cls`、`model=pose` 与 `model=seg` 过滤
 
 ---
 
@@ -435,7 +448,7 @@ yolo11/
 | OBB | `yolo11_obb.exe` | `Yolo11ObbDetector` | `demo_obb_image.exe` | 异步 HTTP 服务 + 独立 Worker + 双服务并行 | Phase 10-12 已验证 |
 | Classification | `yolo11_cls.exe` | `Yolo11ClsDetector` | 原始命令行 demo 保留 | 图片异步 HTTP 服务 + 独立 Worker + top1/topk JSON | Phase 17 已验证 |
 | Pose | `yolo11_pose.exe` | `Yolo11PoseDetector` | 原始命令行 demo 保留 | 图片异步 HTTP 服务 + 独立 Worker + bbox/keypoints/skeleton JSON | Phase 17.5 已验证 |
-| Segmentation | `yolo11_seg.exe` | 计划封装 | 原始命令行 demo 保留 | Phase 18 计划接入图片异步服务 | 暂未服务化 |
+| Segmentation | `yolo11_seg.exe` | `Yolo11SegDetector` | 原始命令行 demo 保留 | 图片异步 HTTP 服务 + 独立 Worker + bbox/polygon/mask metadata JSON + overlay 结果图 | Phase 18 已验证 |
 
 OBB 当前推荐优先使用 CPU 后处理路径进行验证。OBB 的 GPU 后处理路径保留为后续完善和测试方向。
 
@@ -6019,6 +6032,428 @@ Phase 17.0：CLS 图片异步服务接入
 旧的 Detect / OBB / Video / Stream 全部 PASS 后，才能标记 Phase 17 完成。
 ```
 
+
+## Phase 18 / 18.5：SEG 图片异步服务接入、七服务全量回归与最终工程封板候选
+
+### 阶段总定位
+
+Phase 18 是封板前补齐 YOLO11 五大基础图片模型接口的最后一个功能阶段。Phase 17 / 17.5 已经完成 CLS 与 POSE，当前只剩 Segmentation 没有进入 HTTP + Redis Stream + Worker 体系。因此 Phase 18 的目标不是继续扩展平台能力，而是将 SEG 以图片异步服务的形式接入现有工程框架，并验证新增 SEG 不破坏旧的 Detect / OBB / CLS / POSE / Video / Stream 链路。
+
+可以概括为：
+
+```text
+Phase 18.0：SEG 图片异步服务接入
+Phase 18.5：七服务统一启动、检查、回归与最终工程封板候选
+```
+
+本阶段严格遵守 V4.0 范围控制：SEG 第一版只做图片异步服务，不做 `video_seg`、`stream_seg`，不新增前端、数据库、对象存储、多 GPU 自动调度或 Docker/Linux 生产分支。
+
+---
+
+### Phase 18.0：SEG 图片异步服务
+
+Phase 18.0 新增第七类服务：
+
+```text
+SEG Server：yolo11_server.exe + config/server_seg.yaml，端口 8086
+SEG Worker：yolo11_worker.exe + config/worker_seg.yaml
+Redis Stream：yolo:stream:seg
+Consumer Group：yolo11_seg_group
+Consumer Name：seg_worker_1
+Worker Group：image_seg_gpu0
+Task Kind：image_async
+```
+
+新增接口：
+
+| 方法 | 接口 | 说明 |
+|---|---|---|
+| POST | `/api/v1/segment/image/async` | 上传图片并提交 SEG 异步分割任务 |
+| POST | `/api/v1/detect/seg/async` | SEG 兼容别名接口 |
+| GET | `/api/v1/result/{task_id}` | 查询 SEG 任务状态与分割结果 JSON |
+| GET | `/api/v1/result/{task_id}/image` | 下载 overlay 结果图 |
+
+SEG 与 Detect / OBB / POSE 的区别在于：它不仅有 bbox，还需要输出 mask 相关信息。为了避免结果 JSON 过大，本阶段不直接返回完整 mask 矩阵，而是返回：
+
+```text
+bbox
+class_id / class_name / confidence
+mask area_pixels
+mask bbox
+polygon / polygons
+mask coordinate_system
+threshold
+result overlay image
+```
+
+这种设计更适合服务接口：客户端可以拿到足够的分割边界元信息，同时通过结果图查看 overlay 效果；如果后续真实场景确实需要完整 mask，再单独设计 mask binary key、PNG mask 文件或对象存储接口。
+
+---
+
+### 关键代码改动
+
+| 文件 | 主要作用 |
+|---|---|
+| `include/yolo11_seg_api.h` / `api/yolo11_seg_api.cpp` | 封装 YOLO11 SEG TensorRT 推理能力，提供可复用 Runtime API |
+| `include/server/model_output.h` | 扩展 segmentation 输出结构，承载 bbox、mask、polygon、area 等字段 |
+| `src/server/model_runner.cpp` | 新增 `SegModelRunner`，接入 `createModelRunner("seg")` |
+| `src/server/result_serializer.cpp` | 新增 SEG 序列化分支，输出 `bbox_polygon_mask_metadata` |
+| `src/server/http_controller.cpp` | 新增 `/api/v1/segment/image/async` 与 SEG 任务提交逻辑 |
+| `src/server/inference_worker.cpp` | 通用图片 Worker 支持 `model.type=seg` |
+| `src/server/main_server.cpp` / `src/server/main_worker.cpp` | 入口 allowlist 补充 `seg`，避免 server/worker 直接拒绝启动 |
+| `config/server_seg.yaml` / `config/worker_seg.yaml` | SEG Server / Worker active 配置 |
+| `scripts/start_seg.ps1` / `scripts/stop_seg.ps1` | 单独启动和停止 SEG 服务 |
+| `scripts/start_all.ps1` / `scripts/check_all.ps1` / `scripts/stop_all.ps1` | 扩展为七服务统一编排 |
+| `tools/phase18_seg_registry_test.py` | 验证 SEG Worker Registry、ready、workers、metrics |
+| `tools/phase18_seg_smoke_test.py` | 提交 SEG 图片任务并验证 done、num_segmentations、result image、metrics |
+| `tools/phase18_seg_invalid_input_test.py` | 验证非法图片 HTTP 400 拒绝 |
+| `tools/run_phase18_regression.py` | 串联 SEG 单项测试与 Phase 17.5 / 17 / 16 全量回归 |
+
+---
+
+### SEG 输出结构
+
+SEG 结果示例：
+
+```json
+{
+  "success": true,
+  "status": "done",
+  "model_type": "seg",
+  "segmentation_coordinate_system": "original_image_pixels",
+  "segmentation_format": "bbox_polygon_mask_metadata",
+  "mask_format": "thresholded_polygon_metadata",
+  "num_segmentations": 3,
+  "segmentations": [
+    {
+      "class_id": 0,
+      "class_name": "person",
+      "confidence": 0.8921,
+      "bbox": {
+        "x": 254,
+        "y": 60,
+        "w": 75,
+        "h": 203,
+        "x1": 254,
+        "y1": 60,
+        "x2": 329,
+        "y2": 263
+      },
+      "mask": {
+        "coordinate_system": "original_image_pixels",
+        "threshold": 0.5,
+        "area_pixels": 7418,
+        "has_polygon": true,
+        "bbox": {
+          "x1": 254,
+          "y1": 58,
+          "x2": 330,
+          "y2": 264
+        },
+        "polygon": [[275, 58], [254, 132], [274, 200]],
+        "polygons": [[[275, 58], [254, 132], [274, 200]]]
+      }
+    }
+  ],
+  "result_image_url": "/api/v1/result/seg_xxx/image"
+}
+```
+
+这里的坐标全部映射回原始输入图片像素坐标。`polygon` 是主轮廓，`polygons` 可以包含多个轮廓。`area_pixels` 便于后续做面积统计、目标筛选或阈值过滤。
+
+---
+
+### SEG 单服务启动与验证
+
+启动 SEG：
+
+```powershell
+cd D:\tensorrtx\yolo11
+
+powershell -ExecutionPolicy Bypass `
+  -File .\scripts\start_seg.ps1 `
+  -ExeDir .\out\build\x64-Debug
+```
+
+检查：
+
+```powershell
+curl.exe "http://127.0.0.1:8086/api/v1/health"
+curl.exe "http://127.0.0.1:8086/api/v1/ready?model=seg"
+curl.exe "http://127.0.0.1:8086/api/v1/workers?model=seg"
+curl.exe "http://127.0.0.1:8086/api/v1/metrics?model=seg"
+```
+
+提交任务：
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8086/api/v1/segment/image/async" `
+  -H "Content-Type: image/png" `
+  --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+```
+
+查询结果：
+
+```powershell
+curl.exe "http://127.0.0.1:8086/api/v1/result/<task_id>"
+```
+
+下载结果图：
+
+```powershell
+curl.exe "http://127.0.0.1:8086/api/v1/result/<task_id>/image" `
+  --output .\runtime\output\seg_result.jpg
+```
+
+Redis 验收：
+
+```powershell
+wsl -d Ubuntu -- redis-cli -h 172.19.196.109 -p 6379 XPENDING yolo:stream:seg yolo11_seg_group
+```
+
+期望：
+
+```text
+XPENDING = 0
+```
+
+---
+
+### Phase 18 单项测试结果
+
+执行：
+
+```powershell
+python .\tools\phase18_seg_registry_test.py
+python .\tools\phase18_seg_smoke_test.py --image .\images\bus.png
+python .\tools\phase18_seg_invalid_input_test.py
+```
+
+最终结果：
+
+```text
+phase18_seg_registry_test.py       PASS
+phase18_seg_smoke_test.py          PASS
+phase18_seg_invalid_input_test.py  PASS
+```
+
+关键验收数据：
+
+```text
+SEG health = ok
+SEG ready = true
+seg_worker_1 alive = true
+SEG result status = done
+num_segmentations = 3
+result image 可下载
+metrics total_done 正常增长
+total_failed = 0
+XPENDING yolo:stream:seg yolo11_seg_group = 0
+非法输入返回 HTTP 400 / IMAGE_DECODE_FAILED
+```
+
+---
+
+### Phase 18.5：七服务统一启动、检查与全量回归
+
+Phase 18.5 的目标不是继续加新功能，而是确认新增 SEG 后，整个系统仍然可以作为工程封板候选版本稳定运行。
+
+启动七服务：
+
+```powershell
+powershell -ExecutionPolicy Bypass `
+  -File .\scripts\start_all.ps1 `
+  -ExeDir .\out\build\x64-Debug
+```
+
+当前 `start_all.ps1` 会启动 14 个进程：
+
+```text
+7 Workers:
+worker_1
+obb_worker_1
+video_worker_1
+stream_worker_1
+cls_worker_1
+pose_worker_1
+seg_worker_1
+
+7 Servers:
+server_detect_8080
+server_obb_8081
+server_video_8082
+server_stream_8083
+server_cls_8084
+server_pose_8085
+server_seg_8086
+```
+
+统一检查：
+
+```powershell
+powershell -ExecutionPolicy Bypass `
+  -File .\scripts\check_all.ps1 `
+  -UseWslRedisCli `
+  -WslDistro Ubuntu
+```
+
+最终结果：
+
+```text
+detect  health=True ready=True workers=1 metrics=True
+obb     health=True ready=True workers=1 metrics=True
+video   health=True ready=True workers=1 metrics=True
+stream  health=True ready=True workers=1 metrics=True
+cls     health=True ready=True workers=1 metrics=True
+pose    health=True ready=True workers=1 metrics=True
+seg     health=True ready=True workers=1 metrics=True
+
+PING = PONG
+
+detect pending = 0
+obb    pending = 0
+video  pending = 0
+stream pending = 0
+cls    pending = 0
+pose   pending = 0
+seg    pending = 0
+
+PASS: all services are ready and Redis pending looks clean.
+```
+
+全量回归：
+
+```powershell
+python .\tools\run_phase18_regression.py
+```
+
+最终输出：
+
+```text
+Phase 18 Regression Summary: success=True
+
+[PASS] 01_phase18_seg_registry
+[PASS] 02_phase18_seg_smoke
+[PASS] 03_phase18_seg_invalid_input
+[PASS] 04_phase17_5_regression
+```
+
+其中 Phase 17.5 回归继续串联：
+
+```text
+POSE registry / smoke
+CLS registry / smoke
+Phase 16 Detect / OBB / Video / Stream full regression
+```
+
+这说明新增 SEG 后，旧链路没有被破坏。
+
+---
+
+### 本阶段遇到的问题与解决方案
+
+#### 1. SEG Server / Worker 启动后闪退
+
+现象：
+
+```text
+yolo11_worker supports model.type=detect, model.type=obb, model.type=cls or model.type=pose. Current model.type=seg
+Current server supports model.type=detect, model.type=obb, model.type=cls or model.type=pose. Current model.type=seg
+```
+
+原因：
+
+`main_server.cpp` 和 `main_worker.cpp` 的入口白名单还停留在 Phase 17.5，只允许 `detect / obb / cls / pose`，没有补充 `seg`。因此程序在入口检查阶段直接退出，还没有进入 engine 加载。
+
+解决：
+
+在两个入口文件中把 allowlist 扩展为：
+
+```cpp
+model.type = detect / obb / cls / pose / seg
+```
+
+并重新编译：
+
+```powershell
+cmake --build .\out\build\x64-Debug --target yolo11_server yolo11_worker --config Debug
+```
+
+反思：每新增一个模型，不只要改 Runner 和 Serializer，还要检查入口白名单、配置解析、脚本、测试工具和 README。服务化工程里，“能编译”不等于“能被主程序允许启动”。
+
+#### 2. SEG engine 缺失风险
+
+修复 allowlist 后，Worker 下一步才会真正加载：
+
+```text
+./engines/yolo11n-seg.engine
+```
+
+如果该文件不存在，Worker 会在模型加载阶段失败。检查方式：
+
+```powershell
+Test-Path .\engines\yolo11n-seg.engine
+dir .\engines\*seg*
+```
+
+反思：engine、labels、model.type、Runner、Serializer 必须作为一组配置一起检查。
+
+#### 3. WSL localhost 代理 warning
+
+现象：
+
+```text
+wsl: 检测到 localhost 代理配置，但未镜像到 WSL。NAT 模式下的 WSL 不支持 localhost 代理。
+```
+
+判断：
+
+这不是 Redis 错误。只要后续 `redis-cli` 返回 `PONG` 或 `XPENDING=0`，说明 Redis 命令执行成功。
+
+---
+
+### Phase 18 学习反思
+
+1. SEG 的核心不是多一个接口，而是把 mask/polygon 这种不同于 bbox、topk、keypoints 的输出接入统一 `ModelOutput` 体系。
+2. 第一版 SEG 不应该把完整 mask 矩阵塞进 JSON，否则结果过大、网络传输成本高、前端解析也不友好。
+3. `bbox + polygon + mask metadata + overlay image` 是更合理的第一版服务输出。
+4. 每新增模型都必须同时检查：API wrapper、Runner、Serializer、config、labels、engine、main allowlist、scripts、registry、metrics、regression。
+5. `check_all.ps1` 的价值在 Phase 18 体现得很明显：七服务同时运行时，人工逐个检查很容易漏；统一脚本可以快速确认 health、ready、workers、metrics 和 XPENDING。
+6. 全量回归不是形式主义。SEG 接入后继续跑 Phase 17.5 / 17 / 16，证明旧功能没有被破坏。
+7. `XPENDING=0` 仍然是 Redis Stream 异步系统的关键验收指标。
+8. Phase 18 之后，工程主线已经完成五模型图片服务化，继续扩平台收益下降，应该转向真实场景数据和算法效果。
+
+### Phase 18 / 18.5 阶段结论
+
+```text
+Phase 18.0：SEG 图片异步服务接入 —— 已完成并通过验收。
+Phase 18.5：七服务统一检查与全量回归 —— 已完成并进入最终工程封板候选。
+```
+
+当前系统已经具备：
+
+```text
+Detect 图片异步服务
+OBB 图片异步服务
+CLS 图片异步服务
+POSE 图片异步服务
+SEG 图片异步服务
+Detect 视频文件异步服务
+单路 Stream 实时流服务
+Worker Capability Registry
+Health / Ready / Workers / Metrics
+Redis Stream + Redis Binary Image
+Local video / stream runtime storage
+start_all / check_all / run_phase18_regression / stop_all 工程闭环
+```
+
+下一步不建议继续扩展平台功能，而应进入：
+
+```text
+Phase 19+：真实场景、数据集、算法效果、视觉后处理与部署权衡研究
+```
+
+
 ## Git Ignore
 
 以下生成文件不建议上传到 GitHub：
@@ -6067,42 +6502,52 @@ Phase 13.0：Detect 视频文件异步检测最小闭环
 Phase 13.5：视频稳定性、取消、异常输入、Worker 恢复与批量压测
 Structure Cleanup：config 清理与 runtime 目录统一
 Phase 14.0：RTSP / 摄像头流任务最小闭环
-Phase 14.5：流任务稳定性增强、重复启动保护与重连失败处理
+Phase 14.5：流任务稳定性增强、重复启动保护、TTL 续期、stale 清理、stream metrics
 Phase 15：Worker Capability Registry、能力过滤、四类服务统一观测与真实任务验收
 Phase 16：工程封板与上线前整理，一键启动/检查/回归/停止，全量回归 success=True
 Phase 17：CLS 图片异步服务接入，ModelOutput 最小抽象，top1/topk 输出
 Phase 17.5：POSE 图片异步服务接入，COCO17 keypoints/skeleton 输出，全量回归 success=True
+Phase 18：SEG 图片异步服务接入，bbox/polygon/mask metadata 输出，overlay 结果图，SEG 单项测试 PASS
+Phase 18.5：七服务统一启动、检查、全量回归通过，进入最终工程封板候选
 ```
 
 下一步建议进入：
 
 ```text
-Phase 18：SEG 图片异步服务接入
+Phase 19+：真实场景与算法视觉研究
 ```
 
-Phase 18 推荐目标：
+Phase 19 不建议继续扩张平台功能，而应选择一个真实视觉方向，使用当前七服务工程基线做 baseline。推荐方向包括：
 
 ```text
-SEG 图片异步服务接入
-├── 新增 Yolo11SegDetector API 包装
-├── 新增 SegModelRunner，接入现有 IModelRunner / ModelOutput 体系
-├── 新增 ResultSerializer::serializeSeg，输出 bbox + mask/polygon metadata
-├── 新增 config/server_seg.yaml 与 config/worker_seg.yaml
-├── 新增 POST /api/v1/segment/image/async
-├── 新增 SEG registry / ready / metrics 验证脚本
-├── 结果图优先返回 overlay，不建议第一版把完整 mask 矩阵直接塞进 JSON
-└── 每次接入后必须跑 Phase 17.5 全量回归，确认 Detect / OBB / CLS / POSE / Video / Stream 均未被破坏
+工业缺陷检测：detect / seg / obb
+焊接熔池或匙孔视觉：video detect / stream detect / seg
+遥感旋转目标：obb
+人体姿态分析：pose
+通用分类质检：cls
 ```
 
-后续扩展方向：
+Phase 19 推荐目标：
 
-- 多路 RTSP / 摄像头流并发管理
+```text
+真实场景 baseline 实验
+├── 收集一小批真实图像或视频
+├── 使用现有 Detect / OBB / CLS / POSE / SEG / Video / Stream 服务跑基线
+├── 记录误检、漏检、分割边界错误、姿态关键点错误、过曝、模糊、遮挡等问题
+├── 建立固定 testset 与评估表
+├── 决定下一步是数据标注、模型微调、ROI 限制、后处理、时序平滑还是部署优化
+└── 输出实验报告，而不是继续盲目扩平台
+```
+
+封板后除非真实场景明确需要，否则暂不建议继续做：
+
+- 多 GPU 自动调度
+- 多路 RTSP / 摄像头平台
 - WebSocket / SSE 实时推送
-- 更完整的存储抽象与历史任务管理
-- 多 GPU / 多模型 Worker 调度
-- 批量推理 / micro-batching
-- 对象存储或数据库持久化
-- 结构化日志与服务守护脚本
+- 数据库持久化
+- MinIO / S3 对象存储
+- Prometheus / Grafana
+- Docker / Linux 生产分支
 
 ---
 
