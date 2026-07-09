@@ -7,15 +7,15 @@ server:
 
 model:
   type: "detect"
-  engine_path: "D:/tensorrtx/yolo11/engines/yolo11n.engine"
-  labels_path: "D:/tensorrtx/yolo11/labels/coco.txt"
+  engine_path: "./engines/yolo11n.engine"
+  labels_path: "./labels/coco.txt"
   gpu_id: 0
   use_gpu_postprocess: false
 
 output:
   save_result_image: true
-  input_dir: "D:/tensorrtx/yolo11/runtime/input/images/stream"
-  output_dir: "D:/tensorrtx/yolo11/runtime/output/images/stream"
+  input_dir: "./runtime/input/images/stream"
+  output_dir: "./runtime/output/images/stream"
   jpeg_quality: 90
 
 stream:
@@ -25,7 +25,7 @@ stream:
   default_camera_id: 0
   default_rtsp_url: ""
   default_file_path: ""
-  snapshot_dir: "D:/tensorrtx/yolo11/runtime/output/streams"
+  snapshot_dir: "./runtime/output/streams"
   snapshot_interval_frames: 5
   target_fps: 10
   max_no_frame_count: 30
@@ -72,7 +72,7 @@ worker:
 
 logging:
   enabled: true
-  log_dir: "D:/tensorrtx/yolo11/runtime/logs/stream/server"
+  log_dir: "./runtime/logs/stream/server"
   level: "info"
   console: true
   file: true

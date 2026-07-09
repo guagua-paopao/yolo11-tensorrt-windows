@@ -165,16 +165,23 @@ namespace yolo11_server {
         }
 
         std::string phaseNameForConfig(const AppConfig& config) {
+            const std::string model_type = toLowerString(config.model.type);
+            if (model_type == "pose") {
+                return "phase17_5_pose_image_async_service";
+            }
+            if (model_type == "cls") {
+                return "phase17_cls_image_async_service";
+            }
             if (config.stream.enabled) {
                 return "phase15_worker_capability_registry";
             }
             if (config.video.enabled) {
                 return "phase15_worker_capability_registry";
             }
-            if (toLowerString(config.model.type) == "obb") {
+            if (model_type == "obb" || model_type == "detect") {
                 return "phase15_worker_capability_registry";
             }
-            return "phase15_worker_capability_registry";
+            return "phase17_multimodel_output_base";
         }
 
         crow::response makeJsonResponse(int code, const nlohmann::json& body) {
@@ -269,6 +276,18 @@ namespace yolo11_server {
             .methods(crow::HTTPMethod::POST)
             ([this](const crow::request& request) {
             return handleDetectObbImageAsync(request);
+                });
+
+        CROW_ROUTE(app, "/api/v1/classify/image/async")
+            .methods(crow::HTTPMethod::POST)
+            ([this](const crow::request& request) {
+            return handleClassifyImageAsync(request);
+                });
+
+        CROW_ROUTE(app, "/api/v1/pose/image/async")
+            .methods(crow::HTTPMethod::POST)
+            ([this](const crow::request& request) {
+            return handlePoseImageAsync(request);
                 });
 
         CROW_ROUTE(app, "/api/v1/detect/video/async")
@@ -976,6 +995,14 @@ namespace yolo11_server {
 
     crow::response HttpController::handleDetectObbImageAsync(const crow::request& request) {
         return handleImageAsync(request, "obb");
+    }
+
+    crow::response HttpController::handleClassifyImageAsync(const crow::request& request) {
+        return handleImageAsync(request, "cls");
+    }
+
+    crow::response HttpController::handlePoseImageAsync(const crow::request& request) {
+        return handleImageAsync(request, "pose");
     }
 
     crow::response HttpController::handleImageAsync(const crow::request& request, const std::string& expected_model_type) {

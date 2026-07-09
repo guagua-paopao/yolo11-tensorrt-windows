@@ -383,16 +383,16 @@ namespace yolo11_server {
                     return;
                 }
 
-                auto detections = runner_->infer(frame);
-                cv::Mat result = runner_->draw(frame, detections);
+                auto model_output = runner_->infer(frame);
+                cv::Mat result = runner_->draw(frame, model_output);
                 if (result.empty()) {
                     result = frame;
                 }
                 writer.write(result);
 
                 ++processed_frames;
-                total_detections += static_cast<long long>(detections.size());
-                max_objects_per_frame = std::max(max_objects_per_frame, static_cast<long long>(detections.size()));
+                total_detections += static_cast<long long>(model_output.detections.size());
+                max_objects_per_frame = std::max(max_objects_per_frame, static_cast<long long>(model_output.detections.size()));
 
                 if (processed_frames % update_interval == 0) {
                     const long long process_ms = std::chrono::duration_cast<std::chrono::milliseconds>(

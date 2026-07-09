@@ -213,6 +213,28 @@ add_executable(yolo11_obb
 config_yolo11_target(yolo11_obb)
 
 # =========================
+# YOLO11 CLS original executable
+# 原始命令行版本：yolo11_cls.exe
+# =========================
+add_executable(yolo11_cls
+    ${PROJECT_SOURCE_DIR}/yolo11_cls.cpp
+    ${SRCS}
+)
+
+config_yolo11_target(yolo11_cls)
+
+# =========================
+# YOLO11 POSE original executable
+# 原始命令行版本：yolo11_pose.exe
+# =========================
+add_executable(yolo11_pose
+    ${PROJECT_SOURCE_DIR}/yolo11_pose.cpp
+    ${SRCS}
+)
+
+config_yolo11_target(yolo11_pose)
+
+# =========================
 # YOLO11 Runtime API
 # 给外部 C++ 调用的静态库
 #
@@ -228,6 +250,8 @@ config_yolo11_target(yolo11_obb)
 add_library(yolo11_runtime STATIC
     ${PROJECT_API_DIR}/yolo11_detector_api.cpp
     ${PROJECT_API_DIR}/yolo11_obb_api.cpp
+    ${PROJECT_API_DIR}/yolo11_cls_api.cpp
+    ${PROJECT_API_DIR}/yolo11_pose_api.cpp
     ${SRCS}
 )
 

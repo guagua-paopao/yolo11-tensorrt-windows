@@ -1,0 +1,75 @@
+# Example config generated for Phase 16. Copy to active yaml and adjust redis.host / paths if needed.
+# Current active OBB worker service.
+# Start: yolo11_worker.exe config/worker_obb.yaml --consumer-name obb_worker_1
+server:
+  host: "0.0.0.0"
+  port: 8081
+  threads: 4
+  enable_sync_detect: false
+  max_body_size_mb: 16
+
+model:
+  type: "obb"
+  engine_path: "./engines/yolo11n-obb.engine"
+  labels_path: "./labels/dota.txt"
+  gpu_id: 0
+  use_gpu_postprocess: false
+
+output:
+  save_result_image: true
+  input_dir: "./runtime/input/images/obb"
+  output_dir: "./runtime/output/images/obb"
+  jpeg_quality: 90
+
+redis:
+  enabled: true
+  host: "127.0.0.1"
+  port: 6379
+  password: ""
+  db: 0
+  stream_key: "yolo:stream:obb"
+  consumer_group: "yolo11_obb_group"
+  consumer_name: "obb_worker_1"
+  block_ms: 500
+  ttl_seconds: 1800
+  task_ttl_seconds: 1800
+  input_image_ttl_seconds: 600
+  result_image_ttl_seconds: 1800
+  max_image_bytes: 5242880
+  max_result_image_bytes: 5242880
+  delete_input_after_done: true
+  max_redis_used_memory_mb: 2048
+  stream_max_len: 10000
+  enable_pending_reclaim: true
+  pending_min_idle_ms: 10000
+
+worker:
+  enabled: true
+  worker_num: 1
+  min_alive_workers: 1
+  consumer_name_prefix: "obb_worker_"
+  log_task_done: true
+  # Phase 15: descriptive capability/resource declaration.
+  worker_group: "image_obb_gpu0"
+  worker_kind: "image"
+  task_kind: "image_async"
+  stream_type: "redis_stream"
+  max_concurrency: 1
+  heartbeat_enabled: true
+  heartbeat_interval_ms: 3000
+  heartbeat_ttl_seconds: 15
+
+metrics:
+  enabled: true
+  recent_window_seconds: 60
+  ttl_seconds: 3600
+
+logging:
+  enabled: true
+  log_dir: "./runtime/logs/obb/worker"
+  level: "info"
+  console: true
+  file: true
+  flush_interval_sec: 3
+  max_file_size_mb: 50
+  max_files: 5

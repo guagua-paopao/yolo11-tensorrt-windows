@@ -366,8 +366,8 @@ namespace yolo11_server {
                 no_frame_count = 0;
                 ++frame_count;
 
-                auto detections = runner_->infer(frame);
-                cv::Mat result = runner_->draw(frame, detections);
+                auto model_output = runner_->infer(frame);
+                cv::Mat result = runner_->draw(frame, model_output);
                 if (result.empty()) {
                     result = frame;
                 }
@@ -392,7 +392,7 @@ namespace yolo11_server {
                         source_fps,
                         width,
                         height,
-                        static_cast<int>(detections.size()),
+                        static_cast<int>(model_output.detections.size()),
                         update_time_ms,
                         update_error);
                     writeHeartbeatNoexcept();

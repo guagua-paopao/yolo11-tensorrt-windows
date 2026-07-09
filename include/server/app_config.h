@@ -24,6 +24,9 @@ namespace yolo11_server {
         std::string labels_path = "./labels/coco.txt";
         int gpu_id = 0;
         bool use_gpu_postprocess = false;
+
+        // Phase 17: classification top-k output size. Used only when type=cls.
+        int cls_topk = 5;
     };
 
     struct OutputSection {
@@ -180,6 +183,7 @@ namespace yolo11_server {
         std::string labels_path;
         int gpu_id = 0;
         bool use_gpu_postprocess = false;
+        int cls_topk = 5;
         std::string stream_key;
         std::string consumer_group;
         std::string consumer_name_prefix;

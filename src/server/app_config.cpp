@@ -122,6 +122,10 @@ namespace yolo11_server {
         config.model.labels_path = readOrDefault<std::string>(model, "labels_path", config.model.labels_path);
         config.model.gpu_id = readOrDefault<int>(model, "gpu_id", config.model.gpu_id);
         config.model.use_gpu_postprocess = readOrDefault<bool>(model, "use_gpu_postprocess", config.model.use_gpu_postprocess);
+        config.model.cls_topk = readOrDefault<int>(model, "cls_topk", config.model.cls_topk);
+        if (config.model.cls_topk <= 0) {
+            config.model.cls_topk = 5;
+        }
 
         auto output = root["output"];
         config.output.save_result_image = readOrDefault<bool>(output, "save_result_image", config.output.save_result_image);
@@ -442,6 +446,7 @@ namespace yolo11_server {
                 profile.labels_path = readOrDefault<std::string>(node, "labels_path", config.model.labels_path);
                 profile.gpu_id = readOrDefault<int>(node, "gpu_id", config.model.gpu_id);
                 profile.use_gpu_postprocess = readOrDefault<bool>(node, "use_gpu_postprocess", config.model.use_gpu_postprocess);
+                profile.cls_topk = readOrDefault<int>(node, "cls_topk", config.model.cls_topk);
                 profile.stream_key = readOrDefault<std::string>(node, "stream_key", config.redis.stream_key);
                 profile.consumer_group = readOrDefault<std::string>(node, "consumer_group", config.redis.consumer_group);
                 profile.consumer_name_prefix = readOrDefault<std::string>(node, "consumer_name_prefix", config.worker.consumer_name_prefix);
@@ -465,6 +470,7 @@ namespace yolo11_server {
                 config.model.labels_path = profile.labels_path;
                 config.model.gpu_id = profile.gpu_id;
                 config.model.use_gpu_postprocess = profile.use_gpu_postprocess;
+                config.model.cls_topk = profile.cls_topk;
                 config.redis.stream_key = profile.stream_key;
                 config.redis.consumer_group = profile.consumer_group;
                 config.worker.consumer_name_prefix = profile.consumer_name_prefix;
@@ -497,10 +503,32 @@ namespace yolo11_server {
             config.worker.consumer_name_prefix = "worker_";
         }
         if (config.redis.stream_key.empty()) {
-            config.redis.stream_key = config.model.type == "obb" ? "yolo:stream:obb" : "yolo:stream:detect";
+            if (config.model.type == "obb") {
+                config.redis.stream_key = "yolo:stream:obb";
+            }
+            else if (config.model.type == "cls") {
+                config.redis.stream_key = "yolo:stream:cls";
+            }
+            else if (config.model.type == "pose") {
+                config.redis.stream_key = "yolo:stream:pose";
+            }
+            else {
+                config.redis.stream_key = "yolo:stream:detect";
+            }
         }
         if (config.redis.consumer_group.empty()) {
-            config.redis.consumer_group = config.model.type == "obb" ? "yolo11_obb_group" : "yolo11_group";
+            if (config.model.type == "obb") {
+                config.redis.consumer_group = "yolo11_obb_group";
+            }
+            else if (config.model.type == "cls") {
+                config.redis.consumer_group = "yolo11_cls_group";
+            }
+            else if (config.model.type == "pose") {
+                config.redis.consumer_group = "yolo11_pose_group";
+            }
+            else {
+                config.redis.consumer_group = "yolo11_group";
+            }
         }
 
         normalizeWorkerCapability(config);

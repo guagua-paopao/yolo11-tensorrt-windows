@@ -9,8 +9,8 @@ server:
 
 model:
   type: "obb"
-  engine_path: "D:/tensorrtx/yolo11/engines/yolo11n-obb.engine"
-  labels_path: "D:/tensorrtx/yolo11/labels/dota.txt"
+  engine_path: "./engines/yolo11n-obb.engine"
+  labels_path: "./labels/dota.txt"
   gpu_id: 0
   use_gpu_postprocess: false
 
