@@ -248,6 +248,15 @@ config_yolo11_target(yolo11_seg)
 # =========================
 # YOLO11 Runtime API
 # 给外部 C++ 调用的静态库
+#
+# 当前先加入：
+#   yolo11_detector_api.cpp
+#   yolo11_obb_api.cpp
+#
+# 后面你完成 cls / pose / seg 后，再继续往这里加：
+#   ${PROJECT_API_DIR}/yolo11_classifier_api.cpp
+#   ${PROJECT_API_DIR}/yolo11_pose_api.cpp
+#   ${PROJECT_API_DIR}/yolo11_segmenter_api.cpp
 # =========================
 add_library(yolo11_runtime STATIC
     ${PROJECT_API_DIR}/yolo11_detector_api.cpp
