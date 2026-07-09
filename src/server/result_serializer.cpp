@@ -220,6 +220,129 @@ namespace yolo11_server {
             return arr;
         }
 
+        cv::Mat scaleSegMaskToOriginalImage(const cv::Mat& mask, const cv::Mat& image) {
+            if (mask.empty() || image.empty()) {
+                return {};
+            }
+
+            cv::Mat mask_float;
+            if (mask.type() != CV_32FC1) {
+                mask.convertTo(mask_float, CV_32FC1);
+            }
+            else {
+                mask_float = mask;
+            }
+
+            cv::Mat model_mask;
+            if (mask_float.cols != kInputW || mask_float.rows != kInputH) {
+                cv::resize(mask_float, model_mask, cv::Size(kInputW, kInputH));
+            }
+            else {
+                model_mask = mask_float;
+            }
+
+            int x = 0;
+            int y = 0;
+            int w = kInputW;
+            int h = kInputH;
+            const float r_w = kInputW / (image.cols * 1.0f);
+            const float r_h = kInputH / (image.rows * 1.0f);
+            if (r_h > r_w) {
+                w = kInputW;
+                h = static_cast<int>(r_w * image.rows);
+                x = 0;
+                y = (kInputH - h) / 2;
+            }
+            else {
+                w = static_cast<int>(r_h * image.cols);
+                h = kInputH;
+                x = (kInputW - w) / 2;
+                y = 0;
+            }
+
+            cv::Rect roi(x, y, std::max(1, w), std::max(1, h));
+            roi &= cv::Rect(0, 0, model_mask.cols, model_mask.rows);
+            if (roi.empty()) {
+                return {};
+            }
+
+            cv::Mat cropped = model_mask(roi).clone();
+            cv::Mat restored;
+            cv::resize(cropped, restored, image.size(), 0, 0, cv::INTER_LINEAR);
+            return restored;
+        }
+
+        nlohmann::json pointArrayToJson(const std::vector<cv::Point>& points) {
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& p : points) {
+                arr.push_back(nlohmann::json::array({ p.x, p.y }));
+            }
+            return arr;
+        }
+
+        nlohmann::json maskMetadataToJson(const cv::Mat& mask_in_original_image) {
+            nlohmann::json meta;
+            meta["coordinate_system"] = "original_image_pixels";
+            meta["threshold"] = 0.5;
+            meta["width"] = mask_in_original_image.cols;
+            meta["height"] = mask_in_original_image.rows;
+
+            if (mask_in_original_image.empty()) {
+                meta["area_pixels"] = 0;
+                meta["has_polygon"] = false;
+                meta["polygon"] = nlohmann::json::array();
+                meta["polygons"] = nlohmann::json::array();
+                return meta;
+            }
+
+            cv::Mat binary;
+            cv::threshold(mask_in_original_image, binary, 0.5, 255.0, cv::THRESH_BINARY);
+            binary.convertTo(binary, CV_8UC1);
+
+            const int area = cv::countNonZero(binary);
+            meta["area_pixels"] = area;
+
+            std::vector<std::vector<cv::Point>> contours;
+            cv::findContours(binary, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+            if (contours.empty()) {
+                meta["has_polygon"] = false;
+                meta["polygon"] = nlohmann::json::array();
+                meta["polygons"] = nlohmann::json::array();
+                return meta;
+            }
+
+            std::sort(contours.begin(), contours.end(), [](const auto& a, const auto& b) {
+                return std::fabs(cv::contourArea(a)) > std::fabs(cv::contourArea(b));
+            });
+
+            nlohmann::json polygons = nlohmann::json::array();
+            const size_t max_contours = std::min<size_t>(contours.size(), 3);
+            for (size_t i = 0; i < max_contours; ++i) {
+                const double peri = cv::arcLength(contours[i], true);
+                const double epsilon = std::max(2.0, peri * 0.01);
+                std::vector<cv::Point> approx;
+                cv::approxPolyDP(contours[i], approx, epsilon, true);
+                if (approx.size() > 256) {
+                    approx.resize(256);
+                }
+                polygons.push_back(pointArrayToJson(approx));
+            }
+
+            cv::Rect bbox = cv::boundingRect(contours[0]);
+            meta["bbox"] = {
+                {"x1", bbox.x},
+                {"y1", bbox.y},
+                {"x2", bbox.x + bbox.width},
+                {"y2", bbox.y + bbox.height},
+                {"w", bbox.width},
+                {"h", bbox.height}
+            };
+            meta["has_polygon"] = true;
+            meta["polygon"] = polygons.empty() ? nlohmann::json::array() : polygons[0];
+            meta["polygons"] = polygons;
+            return meta;
+        }
+
     }  // namespace
 
     bool ResultSerializer::rectTouchesImageBoundary(const cv::Rect& rect, const cv::Mat& image) {
@@ -465,6 +588,46 @@ namespace yolo11_server {
         return arr;
     }
 
+    nlohmann::json ResultSerializer::segmentationToJson(
+        const SegmentationItem& segmentation,
+        const cv::Mat& image,
+        const LabelMap& label_map,
+        bool debug
+    ) {
+        nlohmann::json item = detectionToJson(segmentation.detection, image, label_map, debug);
+        item["segmentation_format"] = "bbox_polygon_mask_metadata";
+        item["mask_coordinate_system"] = "original_image_pixels";
+        item["mask_format"] = "thresholded_polygon_metadata";
+
+        const cv::Mat original_mask = scaleSegMaskToOriginalImage(segmentation.mask, image);
+        item["mask"] = maskMetadataToJson(original_mask);
+        const auto& mask_json = item["mask"];
+        item["polygon"] = mask_json.contains("polygon") ? mask_json["polygon"] : nlohmann::json::array();
+        item["polygons"] = mask_json.contains("polygons") ? mask_json["polygons"] : nlohmann::json::array();
+
+        if (debug) {
+            item["raw_model_mask"] = {
+                {"width", segmentation.mask.cols},
+                {"height", segmentation.mask.rows},
+                {"type", segmentation.mask.type()}
+            };
+        }
+        return item;
+    }
+
+    nlohmann::json ResultSerializer::segmentationsToJson(
+        const std::vector<SegmentationItem>& segmentations,
+        const cv::Mat& image,
+        const LabelMap& label_map,
+        bool debug
+    ) {
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& item : segmentations) {
+            arr.push_back(segmentationToJson(item, image, label_map, debug));
+        }
+        return arr;
+    }
+
     nlohmann::json ResultSerializer::outputToJsonByModel(
         const ModelOutput& output,
         const cv::Mat& image,
@@ -474,6 +637,9 @@ namespace yolo11_server {
         const std::string lower = toLowerString(output.model_type);
         if (lower == "cls") {
             return classificationsToJson(output.classifications, label_map);
+        }
+        if (lower == "seg") {
+            return segmentationsToJson(output.segmentations, image, label_map, debug);
         }
         return detectionsToJsonByModel(output.detections, image, label_map, lower, debug);
     }

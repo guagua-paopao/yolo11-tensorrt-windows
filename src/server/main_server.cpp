@@ -1,4 +1,4 @@
-#include <exception>
+﻿#include <exception>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -51,13 +51,13 @@ int main(int argc, char** argv) {
         }
         spdlog::info("Config path: {}", config_path);
 
-        if (app_config.model.type != "detect" && app_config.model.type != "obb" && app_config.model.type != "cls" && app_config.model.type != "pose") {
-            spdlog::error("Current server supports model.type=detect, model.type=obb, model.type=cls or model.type=pose. Current model.type={}", app_config.model.type);
+        if (app_config.model.type != "detect" && app_config.model.type != "obb" && app_config.model.type != "cls" && app_config.model.type != "pose" && app_config.model.type != "seg") {
+            spdlog::error("Current server supports model.type=detect, model.type=obb, model.type=cls, model.type=pose or model.type=seg. Current model.type={}", app_config.model.type);
             exit_code = -1;
         }
         else {
             if (app_config.server.enable_sync_detect && app_config.model.type != "detect") {
-                spdlog::error("Sync HTTP detection currently supports model.type=detect only. Disable server.enable_sync_detect for OBB async server.");
+                spdlog::error("Sync HTTP detection currently supports model.type=detect only. Disable server.enable_sync_detect for non-detect async servers.");
                 exit_code = -1;
             }
             else if (app_config.server.enable_sync_detect) {
@@ -113,6 +113,8 @@ int main(int argc, char** argv) {
                     spdlog::info("Detect Async API: POST http://{}:{}/api/v1/detect/image/async", app_config.server.host, app_config.server.port);
                     spdlog::info("OBB Async API: POST http://{}:{}/api/v1/detect/obb/async", app_config.server.host, app_config.server.port);
                     spdlog::info("CLS Async API: POST http://{}:{}/api/v1/classify/image/async", app_config.server.host, app_config.server.port);
+                    spdlog::info("POSE Async API: POST http://{}:{}/api/v1/pose/image/async", app_config.server.host, app_config.server.port);
+                    spdlog::info("SEG Async API: POST http://{}:{}/api/v1/segment/image/async", app_config.server.host, app_config.server.port);
 
                     app.bindaddr(app_config.server.host)
                         .port(static_cast<uint16_t>(app_config.server.port))
@@ -155,3 +157,4 @@ int main(int argc, char** argv) {
 
     return exit_code;
 }
+

@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+#include <opencv2/opencv.hpp>
+
 #include "postprocess.h"
 
 namespace yolo11_server {
@@ -17,13 +19,22 @@ namespace yolo11_server {
         float confidence = 0.0f;
     };
 
+    struct SegmentationItem {
+        Detection detection;
+
+        // Letterboxed model-input mask from YOLO segmentation head.
+        // It is mapped back to original image pixels in ResultSerializer.
+        cv::Mat mask;
+    };
+
     struct ModelOutput {
         std::string model_type = "detect";
         std::vector<Detection> detections;
         std::vector<ClassificationItem> classifications;
+        std::vector<SegmentationItem> segmentations;
 
         bool empty() const {
-            return detections.empty() && classifications.empty();
+            return detections.empty() && classifications.empty() && segmentations.empty();
         }
     };
 

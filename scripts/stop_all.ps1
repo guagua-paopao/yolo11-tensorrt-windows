@@ -1,7 +1,7 @@
-﻿param(
+param(
     [switch]$KillByName,
     [switch]$KillByPort,
-    [string]$PidFile = ".\runtime\pids\phase16_services.json"
+    [string]$PidFile = ".\runtime\pids\phase18_services.json"
 )
 
 $ErrorActionPreference = "Continue"
@@ -102,7 +102,7 @@ if ($KillByName) {
 }
 
 if ($KillByPort) {
-    Stop-Phase16ProcessByPort -Ports @(8080, 8081, 8082, 8083)
+    Stop-Phase16ProcessByPort -Ports @(8080, 8081, 8082, 8083, 8084, 8085, 8086)
 }
 
 Write-Host "Stop request completed."

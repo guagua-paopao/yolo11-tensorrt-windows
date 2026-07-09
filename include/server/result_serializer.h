@@ -69,6 +69,20 @@ namespace yolo11_server {
             const LabelMap& label_map
         );
 
+        static nlohmann::json segmentationToJson(
+            const SegmentationItem& segmentation,
+            const cv::Mat& image,
+            const LabelMap& label_map,
+            bool debug = false
+        );
+
+        static nlohmann::json segmentationsToJson(
+            const std::vector<SegmentationItem>& segmentations,
+            const cv::Mat& image,
+            const LabelMap& label_map,
+            bool debug = false
+        );
+
         static nlohmann::json outputToJsonByModel(
             const ModelOutput& output,
             const cv::Mat& image,

@@ -35,14 +35,20 @@ $services = @(
     [ordered]@{ name="detect"; url="http://127.0.0.1:8080"; model="detect"; task_kind="image_async"; worker_group="image_detect_gpu0" },
     [ordered]@{ name="obb";    url="http://127.0.0.1:8081"; model="obb";    task_kind="image_async"; worker_group="image_obb_gpu0" },
     [ordered]@{ name="video";  url="http://127.0.0.1:8082"; model="video";  task_kind="video_file";  worker_group="video_detect_gpu0" },
-    [ordered]@{ name="stream"; url="http://127.0.0.1:8083"; model="stream"; task_kind="live_stream"; worker_group="stream_detect_gpu0" }
+    [ordered]@{ name="stream"; url="http://127.0.0.1:8083"; model="stream"; task_kind="live_stream"; worker_group="stream_detect_gpu0" },
+    [ordered]@{ name="cls";    url="http://127.0.0.1:8084"; model="cls";    task_kind="image_async"; worker_group="image_cls_gpu0" },
+    [ordered]@{ name="pose";   url="http://127.0.0.1:8085"; model="pose";   task_kind="image_async"; worker_group="image_pose_gpu0" },
+    [ordered]@{ name="seg";    url="http://127.0.0.1:8086"; model="seg";    task_kind="image_async"; worker_group="image_seg_gpu0" }
 )
 
 $queues = @(
     [ordered]@{ name="detect"; stream="yolo:stream:detect"; group="yolo11_group" },
     [ordered]@{ name="obb";    stream="yolo:stream:obb"; group="yolo11_obb_group" },
     [ordered]@{ name="video";  stream="yolo:stream:video:detect"; group="yolo11_video_detect_group" },
-    [ordered]@{ name="stream"; stream="yolo:stream:live:detect"; group="yolo11_stream_detect_group" }
+    [ordered]@{ name="stream"; stream="yolo:stream:live:detect"; group="yolo11_stream_detect_group" },
+    [ordered]@{ name="cls";    stream="yolo:stream:cls"; group="yolo11_cls_group" },
+    [ordered]@{ name="pose";   stream="yolo:stream:pose"; group="yolo11_pose_group" },
+    [ordered]@{ name="seg";    stream="yolo:stream:seg"; group="yolo11_seg_group" }
 )
 
 function Invoke-ApiJson {
@@ -190,7 +196,7 @@ $pendingRows | Select-Object queue,stream,group,pending | Format-Table -AutoSize
 
 $reportDir = Join-Path $ProjectRoot "reports"
 New-Item -ItemType Directory -Force -Path $reportDir | Out-Null
-$reportPath = Join-Path $reportDir "phase16_check_all.json"
+$reportPath = Join-Path $reportDir "phase18_check_all.json"
 [ordered]@{
     timestamp = (Get-Date).ToString("s")
     success = $overallOk

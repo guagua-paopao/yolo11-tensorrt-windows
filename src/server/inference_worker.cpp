@@ -198,10 +198,14 @@ namespace yolo11_server {
         return toLowerString(config_.model.type) == "pose";
     }
 
+    bool InferenceWorker::isSegModel() const {
+        return toLowerString(config_.model.type) == "seg";
+    }
+
     bool InferenceWorker::initModelRunner() {
         runner_ = createModelRunner(config_.model.type);
         if (!runner_) {
-            spdlog::error("Unsupported worker model.type={}. Supported values: detect, obb, cls, pose", config_.model.type);
+            spdlog::error("Unsupported worker model.type={}. Supported values: detect, obb, cls, pose, seg", config_.model.type);
             return false;
         }
 
@@ -398,12 +402,21 @@ namespace yolo11_server {
                 body["skeleton_format"] = "coco17_pairs";
                 body["num_poses"] = model_output.detections.size();
             }
+            else if (isSegModel()) {
+                body["bbox_coordinate_system"] = "original_image_pixels";
+                body["bbox_format"] = "xywh_and_xyxy";
+                body["segmentation_coordinate_system"] = "original_image_pixels";
+                body["segmentation_format"] = "bbox_polygon_mask_metadata";
+                body["mask_format"] = "thresholded_polygon_metadata";
+                body["num_segmentations"] = model_output.segmentations.size();
+            }
             else {
                 body["bbox_coordinate_system"] = "original_image_pixels";
                 body["bbox_format"] = "xywh_and_xyxy";
             }
             body["num_detections"] = model_output.detections.size();
             body["num_classifications"] = model_output.classifications.size();
+            body["num_segmentations"] = model_output.segmentations.size();
             body["queue_wait_ms"] = queue_wait_ms;
             body["inference_ms"] = infer_ms;
             body["total_ms"] = total_ms;
@@ -423,6 +436,10 @@ namespace yolo11_server {
                 else {
                     body["top1"] = nullptr;
                 }
+            }
+            else if (isSegModel()) {
+                body["segmentations"] = ResultSerializer::segmentationsToJson(model_output.segmentations, image, label_map_, false);
+                body["detections"] = body["segmentations"];
             }
             else {
                 body["detections"] = ResultSerializer::detectionsToJsonByModel(model_output.detections, image, label_map_, config_.model.type, false);
@@ -497,6 +514,7 @@ namespace yolo11_server {
                     << " task done: task_id=" << task.task_id
                     << ", detections=" << model_output.detections.size()
                     << ", classifications=" << model_output.classifications.size()
+                    << ", segmentations=" << model_output.segmentations.size()
                     << ", queue_wait_ms=" << queue_wait_ms
                     << ", infer_ms=" << infer_ms
                     << ", total_ms=" << total_ms

@@ -14,6 +14,7 @@
 #include "yolo11_obb_api.h"
 #include "yolo11_cls_api.h"
 #include "yolo11_pose_api.h"
+#include "yolo11_seg_api.h"
 
 namespace yolo11_server {
 
@@ -79,6 +80,19 @@ namespace yolo11_server {
 
     private:
         std::unique_ptr<yolo11::Yolo11PoseDetector> detector_;
+    };
+
+
+    class SegModelRunner final : public IModelRunner {
+    public:
+        std::string modelType() const override;
+        bool init(const AppConfig& config, std::string& error) override;
+        ModelOutput infer(const cv::Mat& image) override;
+        cv::Mat draw(const cv::Mat& image, const ModelOutput& output) override;
+        void release() noexcept override;
+
+    private:
+        std::unique_ptr<yolo11::Yolo11SegDetector> detector_;
     };
 
     std::unique_ptr<IModelRunner> createModelRunner(const std::string& model_type);

@@ -38,6 +38,7 @@ namespace yolo11_server {
         bool isObbModel() const;
         bool isClsModel() const;
         bool isPoseModel() const;
+        bool isSegModel() const;
 
         void heartbeatLoop() noexcept;
         void writeHeartbeatNoexcept() noexcept;

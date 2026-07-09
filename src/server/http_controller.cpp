@@ -166,6 +166,9 @@ namespace yolo11_server {
 
         std::string phaseNameForConfig(const AppConfig& config) {
             const std::string model_type = toLowerString(config.model.type);
+            if (model_type == "seg") {
+                return "phase18_seg_image_async_service";
+            }
             if (model_type == "pose") {
                 return "phase17_5_pose_image_async_service";
             }
@@ -288,6 +291,18 @@ namespace yolo11_server {
             .methods(crow::HTTPMethod::POST)
             ([this](const crow::request& request) {
             return handlePoseImageAsync(request);
+                });
+
+        CROW_ROUTE(app, "/api/v1/segment/image/async")
+            .methods(crow::HTTPMethod::POST)
+            ([this](const crow::request& request) {
+            return handleSegmentImageAsync(request);
+                });
+
+        CROW_ROUTE(app, "/api/v1/detect/seg/async")
+            .methods(crow::HTTPMethod::POST)
+            ([this](const crow::request& request) {
+            return handleSegmentImageAsync(request);
                 });
 
         CROW_ROUTE(app, "/api/v1/detect/video/async")
@@ -1003,6 +1018,10 @@ namespace yolo11_server {
 
     crow::response HttpController::handlePoseImageAsync(const crow::request& request) {
         return handleImageAsync(request, "pose");
+    }
+
+    crow::response HttpController::handleSegmentImageAsync(const crow::request& request) {
+        return handleImageAsync(request, "seg");
     }
 
     crow::response HttpController::handleImageAsync(const crow::request& request, const std::string& expected_model_type) {

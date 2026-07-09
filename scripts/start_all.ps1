@@ -1,5 +1,5 @@
 <#
-Phase 16 launcher for YOLO11 TensorRT C++ services.
+Phase 18 launcher for YOLO11 TensorRT C++ services.
 Run from project root:
   powershell -ExecutionPolicy Bypass -File .\scripts\start_all.ps1
 
@@ -29,7 +29,7 @@ $ProjectRoot = Resolve-ProjectRoot $Root
 Set-Location $ProjectRoot
 
 $PidDir = Join-Path $ProjectRoot "runtime\pids"
-$ProcLogDir = Join-Path $ProjectRoot "runtime\logs\phase16_process"
+$ProcLogDir = Join-Path $ProjectRoot "runtime\logs\phase18_process"
 New-Item -ItemType Directory -Force -Path $PidDir, $ProcLogDir | Out-Null
 
 function Resolve-Exe {
@@ -113,6 +113,12 @@ if (-not $NoWorkers) {
     Start-Sleep -Seconds $StartupDelaySeconds
     $started += Start-YoloProcess "worker_stream" "yolo11_stream_worker.exe" @("config\worker_stream.yaml", "--consumer-name", "stream_worker_1")
     Start-Sleep -Seconds $StartupDelaySeconds
+    $started += Start-YoloProcess "worker_cls" "yolo11_worker.exe" @("config\worker_cls.yaml", "--consumer-name", "cls_worker_1")
+    Start-Sleep -Seconds $StartupDelaySeconds
+    $started += Start-YoloProcess "worker_pose" "yolo11_worker.exe" @("config\worker_pose.yaml", "--consumer-name", "pose_worker_1")
+    Start-Sleep -Seconds $StartupDelaySeconds
+    $started += Start-YoloProcess "worker_seg" "yolo11_worker.exe" @("config\worker_seg.yaml", "--consumer-name", "seg_worker_1")
+    Start-Sleep -Seconds $StartupDelaySeconds
 }
 
 if (-not $NoServers) {
@@ -123,9 +129,15 @@ if (-not $NoServers) {
     $started += Start-YoloProcess "server_video_8082" "yolo11_server.exe" @("config\server_video.yaml")
     Start-Sleep -Seconds $StartupDelaySeconds
     $started += Start-YoloProcess "server_stream_8083" "yolo11_server.exe" @("config\server_stream.yaml")
+    Start-Sleep -Seconds $StartupDelaySeconds
+    $started += Start-YoloProcess "server_cls_8084" "yolo11_server.exe" @("config\server_cls.yaml")
+    Start-Sleep -Seconds $StartupDelaySeconds
+    $started += Start-YoloProcess "server_pose_8085" "yolo11_server.exe" @("config\server_pose.yaml")
+    Start-Sleep -Seconds $StartupDelaySeconds
+    $started += Start-YoloProcess "server_seg_8086" "yolo11_server.exe" @("config\server_seg.yaml")
 }
 
-$pidFile = Join-Path $PidDir "phase16_services.json"
+$pidFile = Join-Path $PidDir "phase18_services.json"
 $started | ConvertTo-Json -Depth 8 | Set-Content -Path $pidFile -Encoding UTF8
 
 Write-Host ""

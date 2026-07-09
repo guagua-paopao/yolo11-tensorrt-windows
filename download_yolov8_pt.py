@@ -10,7 +10,8 @@ models = [
     #"yolo11n.pt",
     #"yolo11n-obb.pt"
     #"yolo11n-cls.pt"
-    "yolo11n-pose.pt"
+    #"yolo11n-pose.pt"
+    "yolo11n-seg.pt"
 ]
 
 

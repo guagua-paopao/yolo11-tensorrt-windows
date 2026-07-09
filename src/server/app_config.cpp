@@ -512,6 +512,9 @@ namespace yolo11_server {
             else if (config.model.type == "pose") {
                 config.redis.stream_key = "yolo:stream:pose";
             }
+            else if (config.model.type == "seg") {
+                config.redis.stream_key = "yolo:stream:seg";
+            }
             else {
                 config.redis.stream_key = "yolo:stream:detect";
             }
@@ -525,6 +528,9 @@ namespace yolo11_server {
             }
             else if (config.model.type == "pose") {
                 config.redis.consumer_group = "yolo11_pose_group";
+            }
+            else if (config.model.type == "seg") {
+                config.redis.consumer_group = "yolo11_seg_group";
             }
             else {
                 config.redis.consumer_group = "yolo11_group";

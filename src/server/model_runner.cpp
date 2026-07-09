@@ -285,6 +285,85 @@ namespace yolo11_server {
         }
     }
 
+
+    std::string SegModelRunner::modelType() const {
+        return "seg";
+    }
+
+    bool SegModelRunner::init(const AppConfig& config, std::string& error) {
+        try {
+            yolo11::SegConfig detector_config;
+            detector_config.engine_path = config.model.engine_path;
+            detector_config.labels_path = config.model.labels_path;
+            detector_config.gpu_id = config.model.gpu_id;
+            detector_config.use_gpu_postprocess = config.model.use_gpu_postprocess;
+
+            detector_ = std::make_unique<yolo11::Yolo11SegDetector>();
+            if (!detector_->init(detector_config)) {
+                error = "Yolo11SegDetector::init returned false";
+                detector_.reset();
+                return false;
+            }
+            return true;
+        }
+        catch (const std::exception& e) {
+            error = e.what();
+            detector_.reset();
+            return false;
+        }
+        catch (...) {
+            error = "unknown exception while initializing SegModelRunner";
+            detector_.reset();
+            return false;
+        }
+    }
+
+    ModelOutput SegModelRunner::infer(const cv::Mat& image) {
+        if (!detector_) {
+            throw std::runtime_error("SegModelRunner is not initialized");
+        }
+        ModelOutput output;
+        output.model_type = "seg";
+        const auto seg_results = detector_->infer(image);
+        output.segmentations.reserve(seg_results.size());
+        output.detections.reserve(seg_results.size());
+        for (const auto& item : seg_results) {
+            SegmentationItem out;
+            out.detection = item.detection;
+            out.mask = item.mask;
+            output.segmentations.push_back(out);
+            output.detections.push_back(item.detection);
+        }
+        return output;
+    }
+
+    cv::Mat SegModelRunner::draw(const cv::Mat& image, const ModelOutput& output) {
+        if (!detector_) {
+            throw std::runtime_error("SegModelRunner is not initialized");
+        }
+        std::vector<yolo11::SegmentationResult> seg_results;
+        seg_results.reserve(output.segmentations.size());
+        for (const auto& item : output.segmentations) {
+            yolo11::SegmentationResult result;
+            result.detection = item.detection;
+            result.mask = item.mask;
+            seg_results.push_back(result);
+        }
+        return detector_->draw(image, seg_results);
+    }
+
+    void SegModelRunner::release() noexcept {
+        try {
+            if (detector_) {
+                detector_->release();
+                detector_.reset();
+            }
+        }
+        catch (...) {
+            detector_.reset();
+        }
+    }
+
     std::unique_ptr<IModelRunner> createModelRunner(const std::string& model_type) {
         const std::string lower = toLowerString(model_type);
         if (lower == "detect") {
@@ -298,6 +377,9 @@ namespace yolo11_server {
         }
         if (lower == "pose") {
             return std::make_unique<PoseModelRunner>();
+        }
+        if (lower == "seg") {
+            return std::make_unique<SegModelRunner>();
         }
         return nullptr;
     }

@@ -36,6 +36,7 @@ namespace yolo11_server {
         crow::response handleDetectObbImageAsync(const crow::request& request);
         crow::response handleClassifyImageAsync(const crow::request& request);
         crow::response handlePoseImageAsync(const crow::request& request);
+        crow::response handleSegmentImageAsync(const crow::request& request);
         crow::response handleDetectVideoAsync(const crow::request& request);
         crow::response handleStreamStart(const crow::request& request);
         crow::response handleStreamStop(const std::string& stream_id) const;
