@@ -1,6 +1,6 @@
 # YOLO11 TensorRT Windows
 
-本项目用于在 Windows 平台部署 YOLO11 TensorRT 推理，支持 Visual Studio 2019、CUDA、TensorRT 10、OpenCV、可复用 C++ Runtime API、纯 C++ HTTP 图片检测服务、Redis Stream 异步任务队列、Server / Worker 独立进程部署。当前项目已经推进到 Phase 15，支持 Detection 图片异步服务、OBB 图片异步服务、Detect + OBB 双服务并行部署、Detect 视频文件异步检测服务、单路 RTSP / 摄像头 / 本地文件流任务服务化，以及 Detect / OBB / Video / Stream 四类 Worker 的能力注册与统一观测。项目已经具备 Worker 心跳、ready 检查、Redis Binary 图片存储、视频本地文件存储、流任务状态管理、最新帧 snapshot 输出、TTL 清理、Pending 恢复、日志、labels_path、metrics、多模型 Runner 抽象、视频任务进度、取消、异常输入拒绝、Worker 恢复、重复启动保护、流任务重连失败处理、批量压测、统一 runtime 目录管理，以及 `model_type / runner_model_type / worker_group / worker_kind / task_kind / stream_type / gpu_id` 等 Worker capability 字段。
+本项目用于在 Windows 平台部署 YOLO11 TensorRT 推理，支持 Visual Studio 2019、CUDA、TensorRT 10、OpenCV、可复用 C++ Runtime API、纯 C++ HTTP 图片检测服务、Redis Stream 异步任务队列、Server / Worker 独立进程部署。当前项目已经推进到 Phase 17.5，已在 Phase 16 工程封板基线上继续接入 YOLO11 Classification 图片异步服务和 YOLO11 Pose 图片异步服务。当前系统已经支持 Detection 图片异步服务、OBB 图片异步服务、CLS 图片异步服务、POSE 图片异步服务、Detect 视频文件异步检测服务、单路 RTSP / 摄像头 / 本地文件流任务服务化，以及 Detect / OBB / Video / Stream / CLS / Pose 六类 Worker 的能力注册与统一观测。项目已经具备 Worker 心跳、ready 检查、Redis Binary 图片存储、视频本地文件存储、流任务状态管理、最新帧 snapshot 输出、TTL 清理、Pending 恢复、日志、labels_path、metrics、多模型 Runner 抽象、ModelOutput 统一输出抽象、视频任务进度、取消、异常输入拒绝、Worker 恢复、重复启动保护、流任务重连失败处理、批量压测、统一 runtime 目录管理，以及 `model_type / runner_model_type / worker_group / worker_kind / task_kind / stream_type / gpu_id` 等 Worker capability 字段。
 
 这个 README 中文版主要用于记录项目演进过程、踩坑原因、修改逻辑和阶段性反思。
 
@@ -9,8 +9,16 @@
 当前项目已经完成：
 
 ```text
-Phase 15：Worker / 模型 / 任务类型能力注册与统一观测
+Phase 17.5：POSE 图片异步服务接入与全量回归通过
 ```
+
+
+最终补充说明：当前 Phase 17.5 已完成 POSE 图片异步服务接入，并在 Phase 17 CLS 图片异步服务基础上通过了完整回归。当前系统已经形成 Detect / OBB / CLS / POSE 四类图片异步服务，加上 Video 文件异步服务和 Stream 实时流服务。Phase 17.5 最终验收中，POSE 服务 `health=true`、`ready=true`、`workers=1`、`metrics=true`，`/api/v1/pose/image/async` 可返回 `bbox + COCO17 keypoints + skeleton`，Redis `XPENDING yolo:stream:pose yolo11_pose_group = 0`，POSE metrics 显示 `total_done=3`、`total_failed=0`。随后执行 `run_phase17_5_regression.py`，串联 POSE、CLS 与 Phase 16 Detect / OBB / Video / Stream 全量回归，最终 `Phase 17.5 Regression Summary: success=True`。
+
+最终补充说明：Phase 17.0 已完成 CLS 图片异步服务接入。CLS 独立运行于 8084 端口，使用 `yolo:stream:cls` 和 `yolo11_cls_group`，支持 `POST /api/v1/classify/image/async`、`GET /api/v1/result/{task_id}` 和 `GET /api/v1/result/{task_id}/image`。结果 JSON 返回 `top1 / topk`，并写入 cls 维度 metrics。Phase 17.0 的关键不是单独接一个分类接口，而是引入 `ModelOutput` 最小抽象，让 Detect / OBB / CLS / Pose 后续可以在统一 Worker 与 ResultSerializer 框架下输出不同结构，避免所有模型都硬塞进 `std::vector<Detection>`。
+
+最终补充说明：当前 Phase 16 已完成工程封板与上线前整理。项目已经具备 `start_all.ps1 -> check_all.ps1 -> run_full_regression.py -> stop_all.ps1` 的标准闭环；Detect / OBB / Video / Stream 四类服务可一键启动、统一检查、全量回归和一键停止。最终验收中，四类服务 `health=true`、`ready=true`、`workers=1`、`metrics=true`，Redis `PING=PONG`，四条 Redis Stream 的 `XPENDING=0`，全量回归 `success=True`。Phase 16 不修改 C++ 核心推理链路，因此旧服务 `/health` 中的 `phase=phase15_worker_capability_registry` 属于预期现象。
+
 最终补充说明：当前 Phase 15 已完成 Detect / OBB / Video / Stream 四类服务的 Worker Capability Registry。`/health`、`/ready`、`/workers`、`/metrics` 已能按 `model`、`task_kind`、`worker_group`、`worker_kind`、`stream_type`、`gpu_id` 等维度过滤和观测 Worker。四类服务均已完成真实任务验证：Detect 图片任务 done，OBB 图片任务 done，Video 文件任务 done 并可下载结果视频，Stream 摄像头流完成 start / snapshot / stop / metrics。最终四条 Redis Stream 均 `XPENDING=0`。
 
 
@@ -124,8 +132,40 @@ Phase 15：Worker / 模型 / 任务类型能力注册与统一观测
 - Phase 15 修复 Stream API 语义：`/stream/start` 和 `/stream/status` 的对外 `task_kind` 统一为 `live_stream`
 
 
+
+- Phase 16 工程封板脚本：新增 `scripts/start_all.ps1`，可统一启动 Detect / OBB / Video / Stream 的 4 个 Server 与 4 个 Worker
+- Phase 16 停止脚本：新增并修复 `scripts/stop_all.ps1`，支持根据 PID 文件停止服务，并支持 `-KillByName`、`-KillByPort` 兜底清理
+- Phase 16 检查脚本：新增并修复 `scripts/check_all.ps1`，统一检查四个端口的 `/health`、`/ready`、`/workers`、`/metrics` 以及 Redis `PING` 和四条 Stream 的 `XPENDING`
+- Phase 16 支持 WSL Redis CLI：`check_all.ps1 -UseWslRedisCli -WslDistro Ubuntu` 可避免 Windows 没有 `redis-cli` 或默认 WSL 指向 `docker-desktop` 的问题
+- Phase 16 全量回归入口：新增 `tools/run_full_regression.py`，串联 Phase 12 / 13 / 14 / 15 的核心 smoke、cancel、source matrix 和 registry 测试
+- Phase 16 报告归档：全量回归报告写入 `reports/phase16/<timestamp>/phase16_full_regression_summary.json`
+- Phase 16 PID 与进程日志归档：启动后生成 `runtime/pids/phase16_services.json`，进程 stdout / stderr 写入 `runtime/logs/phase16_process/`
+- Phase 16 配置模板整理：新增 `config/*.example.yaml`，让 Redis host、engine path、labels path、runtime path 等部署字段更容易迁移
+- Phase 16 最终验收：`check_all.ps1` 返回 PASS，`run_full_regression.py` 返回 `success=True`，`stop_all.ps1` 正常完成
+- Phase 17.0 ModelOutput 最小抽象：新增 `include/server/model_output.h`，让模型输出从单一 `std::vector<Detection>` 升级为可承载 detections / classifications / keypoints 等多类型结果的统一结构
+- Phase 17.0 CLS API 封装：新增 `Yolo11ClsDetector`，复用原始 `yolo11_cls.cpp` 的 TensorRT 分类推理逻辑，并服务化为可被 Worker 调用的 Runtime API
+- Phase 17.0 CLS Runner：新增 `ClsModelRunner`，接入 `IModelRunner` 工厂体系，支持 `model.type=cls`
+- Phase 17.0 CLS 序列化：新增 `ResultSerializer::serializeCls`，返回 `classification_format=top1_and_topk`、`top1`、`topk`、`num_classifications`
+- Phase 17.0 CLS 独立配置：新增 `config/server_cls.yaml`、`config/worker_cls.yaml`，服务端口 8084，Redis Stream 为 `yolo:stream:cls`，Consumer Group 为 `yolo11_cls_group`
+- Phase 17.0 CLS 独立脚本：新增 `scripts/start_cls.ps1` 与 `scripts/stop_cls.ps1`
+- Phase 17.0 CLS 自动测试：新增 `tools/phase17_cls_registry_test.py`、`tools/phase17_cls_smoke_test.py`、`tools/run_phase17_regression.py`
+- Phase 17.0 CLS 验收：`/health`、`/ready`、`/workers`、`/metrics` 正常，`POST /api/v1/classify/image/async` 返回 queued，结果查询返回 done + top1/topk，`XPENDING=0`，`run_phase17_regression.py --skip-phase16` 返回 `success=True`
+- Phase 17.0 CLS metrics 验收：`metrics_found=true`，`total_tasks=3`，`total_tasks_done=3`，`total_tasks_failed=0`，`worker_distribution.cls_worker_1=3`
+- Phase 17.5 POSE API 封装：新增 `Yolo11PoseDetector`，复用原始 `yolo11_pose.cpp` 的 TensorRT pose 推理逻辑，并服务化为 Runtime API
+- Phase 17.5 POSE Runner：新增 `PoseModelRunner`，接入 `IModelRunner` 工厂体系，支持 `model.type=pose`
+- Phase 17.5 POSE 序列化：结果 JSON 返回 `bbox`、`keypoints`、`skeleton`、`num_keypoints`、`valid_keypoints`、`pose_coordinate_system=original_image_pixels`、`keypoint_format=coco17_xy_conf`
+- Phase 17.5 POSE 独立配置：新增 `config/server_pose.yaml`、`config/worker_pose.yaml`，服务端口 8085，Redis Stream 为 `yolo:stream:pose`，Consumer Group 为 `yolo11_pose_group`
+- Phase 17.5 POSE 独立脚本：新增 `scripts/start_pose.ps1` 与 `scripts/stop_pose.ps1`
+- Phase 17.5 POSE 自动测试：新增 `tools/phase17_5_pose_registry_test.py`、`tools/phase17_5_pose_smoke_test.py`、`tools/run_phase17_5_regression.py`
+- Phase 17.5 POSE 单项验收：`/health`、`/ready`、`/workers`、`/metrics` 正常，`POST /api/v1/pose/image/async` 返回 queued，结果查询返回 done + 3 个 person pose，每个 pose 包含 17 个 COCO keypoints
+- Phase 17.5 POSE metrics 验收：`metrics_found=true`，`total_tasks=3`，`total_tasks_done=3`，`total_tasks_failed=0`，`worker_distribution.pose_worker_1=3`
+- Phase 17.5 Redis 验收：`XPENDING yolo:stream:pose yolo11_pose_group = 0`
+- Phase 17.5 全量回归验收：`run_phase17_5_regression.py` 同时跑通 POSE registry/smoke、CLS 回归和 Phase 16 Full Regression，最终 `Phase 17.5 Regression Summary: success=True`
+
+
 当前还没有做：
 
+- Segmentation 图片异步服务接入
 - 多路 RTSP / 摄像头并发流管理
 - WebSocket / SSE 实时推送检测结果
 - 多 GPU / 多模型 Worker 调度
@@ -133,7 +173,7 @@ Phase 15：Worker / 模型 / 任务类型能力注册与统一观测
 - Prometheus 指标、服务守护、Docker / Linux 部署路径
 - 更严格的长视频压测、磁盘空间保护和历史任务清理策略
 
-当前开发原则是：**Detect 图片、OBB 图片、Detect 视频文件异步服务和单路流任务服务已经形成稳定基础；下一阶段进入 Worker / 模型调度增强之前，优先保证配置、目录、脚本、Redis 状态和测试入口足够清晰，避免服务类型增多后工程结构失控。**
+当前开发原则是：**Detect 图片、OBB 图片、Detect 视频文件异步服务和单路流任务服务已经形成稳定基础；下一阶段进入 SEG 图片异步服务之前，优先保证 Detect / OBB / CLS / POSE / Video / Stream 六类服务的配置、目录、脚本、Redis 状态和测试入口足够清晰，避免服务类型增多后工程结构失控。**
 
 ---
 
@@ -149,6 +189,8 @@ Phase 15：Worker / 模型 / 任务类型能力注册与统一观测
 - 提供 C++ Runtime API 封装
   - `Yolo11Detector`
   - `Yolo11ObbDetector`
+  - `Yolo11ClsDetector`
+  - `Yolo11PoseDetector`
 - 保留原始命令行 demo，不破坏原项目验证路径
 - 新增纯 C++ HTTP Server 模块
   - `yolo11_server.exe`
@@ -179,6 +221,10 @@ Phase 15：Worker / 模型 / 任务类型能力注册与统一观测
   - Worker heartbeat 中包含 `model_type`、`runner_model_type`、`worker_group`、`worker_kind`、`task_kind`、`stream_type`、`gpu_id`
   - 支持按 `worker_group=image_detect_gpu0/image_obb_gpu0/video_detect_gpu0/stream_detect_gpu0` 进行就绪检查
   - 支持区分外部服务类型与内部推理模型，例如 `model_type=video`、`runner_model_type=detect`
+  - Phase 17 ModelOutput 最小抽象：支持分类 top1/topk 与姿态 bbox/keypoints/skeleton 等非检测框结构
+  - Phase 17 CLS 图片异步服务：`POST /api/v1/classify/image/async`，独立 8084 端口、独立 Redis Stream、独立 Worker
+  - Phase 17.5 POSE 图片异步服务：`POST /api/v1/pose/image/async`，独立 8085 端口、独立 Redis Stream、独立 Worker
+  - Phase 17 / 17.5 `/workers`、`/ready`、`/metrics` 支持 `model=cls` 与 `model=pose` 过滤
 
 ---
 
@@ -387,9 +433,9 @@ yolo11/
 |---|---|---|---|---|---|
 | Detection | `yolo11_det.exe` | `Yolo11Detector` | `demo_image.exe`, `demo_video.exe` | 同步 + Redis 异步 + 多 Worker + 视频文件异步服务 + 单路流服务 | 已支持 |
 | OBB | `yolo11_obb.exe` | `Yolo11ObbDetector` | `demo_obb_image.exe` | 异步 HTTP 服务 + 独立 Worker + 双服务并行 | Phase 10-12 已验证 |
-| Classification | 源码已有 | 计划封装 | 计划添加 | 后续计划 | 暂未封装 |
-| Segmentation | 源码已有 | 计划封装 | 计划添加 | 后续计划 | 暂未封装 |
-| Pose | 源码已有 | 计划封装 | 计划添加 | 后续计划 | 暂未封装 |
+| Classification | `yolo11_cls.exe` | `Yolo11ClsDetector` | 原始命令行 demo 保留 | 图片异步 HTTP 服务 + 独立 Worker + top1/topk JSON | Phase 17 已验证 |
+| Pose | `yolo11_pose.exe` | `Yolo11PoseDetector` | 原始命令行 demo 保留 | 图片异步 HTTP 服务 + 独立 Worker + bbox/keypoints/skeleton JSON | Phase 17.5 已验证 |
+| Segmentation | `yolo11_seg.exe` | 计划封装 | 原始命令行 demo 保留 | Phase 18 计划接入图片异步服务 | 暂未服务化 |
 
 OBB 当前推荐优先使用 CPU 后处理路径进行验证。OBB 的 GPU 后处理路径保留为后续完善和测试方向。
 
@@ -513,6 +559,8 @@ out\build\x64-Debug
 myplugins
 yolo11_det
 yolo11_obb
+yolo11_cls
+yolo11_pose
 demo_image
 demo_video
 demo_obb_image
@@ -4445,21 +4493,18 @@ Phase 15 已完成并通过验收。
 
 Phase 15 的意义不是自动调度本身，而是为自动调度做准备。只有 Worker 能清楚声明“我是谁、我能处理什么、我绑定什么资源、当前是否空闲”，后续多 GPU、多路 RTSP、服务守护和生产部署才有稳定基础。
 
+后续阶段实际推进说明：
+
+```text
+Phase 16：工程封板与上线前整理 —— 已完成
+```
+
+Phase 16 已完成服务启动 / 停止脚本标准化、统一检查脚本、全量回归入口、配置模板和运行报告归档。当前项目已经具备一键启动、统一检查、全量回归和一键停止的封板基线。
+
 下一阶段建议进入：
 
 ```text
-Phase 16：生产化增强前置
-```
-
-Phase 16 可以重点处理：
-
-```text
-Storage 抽象
-服务启动 / 停止脚本整理
-日志规范与运行报告
-metrics 对齐
-Redis / runtime 清理策略
-配置模板与部署文档
+Phase 17：CLS 图片异步服务接入
 ```
 
 继续后置：
@@ -4471,6 +4516,476 @@ Docker / Linux 迁移
 Prometheus / Grafana
 数据库持久化
 前端页面
+```
+
+---
+
+
+
+## Phase 17 / 17.5：CLS 图片异步服务、POSE 图片异步服务与 ModelOutput 抽象
+
+### 阶段总定位
+
+Phase 17 和 Phase 17.5 是在 Phase 16 工程封板基线之后，继续补齐 YOLO11 五大基础任务接口的阶段。Phase 16 已经把 Detect / OBB / Video / Stream 四类服务整理成可启动、可检查、可回归、可停止的工程基线；Phase 17 开始把原始 YOLO11 分类与姿态估计 demo 接入同一套 HTTP + Redis Stream + Worker 服务框架。
+
+这两个阶段可以概括为：
+
+```text
+Phase 17.0：CLS 图片异步服务接入 + ModelOutput 最小抽象
+Phase 17.5：POSE 图片异步服务接入 + 全量回归验证
+```
+
+本阶段的关键不是简单新增两个接口，而是把模型输出从单一检测框结构升级为可扩展结构。分类任务输出 top1 / topk，姿态任务输出 bbox + 17 个 COCO keypoints + skeleton，二者都不适合继续强行塞进原来的 `std::vector<Detection>` 语义里。因此 Phase 17 先引入 `ModelOutput`，再接 CLS；Phase 17.5 在同一抽象基础上接入 POSE。
+
+---
+
+### Phase 17.0：CLS 图片异步服务
+
+Phase 17.0 新增独立分类图片异步服务：
+
+```text
+CLS Server：yolo11_server.exe + config/server_cls.yaml，端口 8084
+CLS Worker：yolo11_worker.exe + config/worker_cls.yaml
+Redis Stream：yolo:stream:cls
+Consumer Group：yolo11_cls_group
+Consumer Name：cls_worker_1
+Worker Group：image_cls_gpu0
+Task Kind：image_async
+Stream Type：redis_stream
+```
+
+新增接口：
+
+| 方法 | 接口 | 说明 |
+|---|---|---|
+| POST | `/api/v1/classify/image/async` | 上传图片并提交异步分类任务 |
+| GET | `/api/v1/result/{task_id}` | 查询分类任务状态和 top1/topk 结果 |
+| GET | `/api/v1/result/{task_id}/image` | 下载带分类文字标注的结果图 |
+| GET | `/api/v1/ready?model=cls&task_kind=image_async&worker_group=image_cls_gpu0` | 检查 CLS Worker 是否就绪 |
+| GET | `/api/v1/workers?model=cls` | 查看 CLS Worker heartbeat |
+| GET | `/api/v1/metrics?model=cls` | 查看 CLS 任务统计 |
+
+### CLS 主要代码改动
+
+| 文件 | 内容 |
+|---|---|
+| `include/server/model_output.h` | 新增统一模型输出结构，支持 detections 与 classifications |
+| `include/yolo11_cls_api.h` | 新增 CLS Runtime API 头文件 |
+| `api/yolo11_cls_api.cpp` | 封装原始 `yolo11_cls.cpp` 推理逻辑 |
+| `include/server/model_runner.h` | 新增 `ClsModelRunner` 声明 |
+| `src/server/model_runner.cpp` | `createModelRunner("cls")` 返回 CLS Runner |
+| `include/server/result_serializer.h` | 新增 CLS 序列化接口 |
+| `src/server/result_serializer.cpp` | 输出 `classification_format`、`top1`、`topk` |
+| `src/server/http_controller.cpp` | 注册 `/api/v1/classify/image/async` |
+| `config/server_cls.yaml` | CLS Server 配置，端口 8084 |
+| `config/worker_cls.yaml` | CLS Worker 配置 |
+| `scripts/start_cls.ps1` / `stop_cls.ps1` | CLS 独立启动 / 停止脚本 |
+| `tools/phase17_cls_registry_test.py` | CLS Worker Registry 测试 |
+| `tools/phase17_cls_smoke_test.py` | CLS 端到端 smoke 测试 |
+| `tools/run_phase17_regression.py` | CLS + Phase16 回归入口 |
+
+### ModelOutput 最小抽象
+
+Phase 17 之前，`IModelRunner` 主要返回 `std::vector<Detection>`。这对 Detect / OBB 勉强可用，但不适合分类。分类没有 bbox，它的核心输出是类别概率分布。于是新增：
+
+```cpp
+struct ClassificationItem {
+    int class_id = -1;
+    std::string class_name;
+    float confidence = 0.0f;
+};
+
+struct ModelOutput {
+    std::string model_type;
+    std::vector<Detection> detections;
+    std::vector<ClassificationItem> classifications;
+};
+```
+
+这样 Worker 主循环只关心：
+
+```text
+读取图片
+-> runner->infer(image)
+-> runner->draw(image, output)
+-> ResultSerializer 根据 model_type 序列化
+-> 写回 Redis
+-> XACK
+```
+
+而不同模型的输出差异被收敛到 Runner 和 Serializer 中。
+
+### CLS 返回结果示例
+
+```json
+{
+  "success": true,
+  "status": "done",
+  "model_type": "cls",
+  "classification_format": "top1_and_topk",
+  "num_classifications": 5,
+  "top1": {
+    "class_id": 608,
+    "class_name": "class_608",
+    "confidence": 0.2945369780063629
+  },
+  "topk": [
+    {
+      "rank": 1,
+      "class_id": 608,
+      "class_name": "class_608",
+      "confidence": 0.2945369780063629
+    }
+  ],
+  "queue_wait_ms": 2,
+  "inference_ms": 13.2195,
+  "total_ms": 30
+}
+```
+
+说明：当前 `labels/imagenet.txt` 采用 `class_0` 到 `class_999` 占位标签，目的是先验证服务化链路。真实部署时应替换为 ImageNet 1000 类真实类别名。
+
+### CLS 验收命令
+
+启动：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_cls.ps1 -ExeDir .\out\build\x64-Debug
+```
+
+检查：
+
+```powershell
+curl.exe "http://127.0.0.1:8084/api/v1/health"
+curl.exe "http://127.0.0.1:8084/api/v1/ready?model=cls&task_kind=image_async&worker_group=image_cls_gpu0"
+curl.exe "http://127.0.0.1:8084/api/v1/workers?model=cls"
+curl.exe "http://127.0.0.1:8084/api/v1/metrics?model=cls"
+```
+
+提交任务：
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8084/api/v1/classify/image/async" `
+  -H "Content-Type: image/png" `
+  --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+```
+
+自动测试：
+
+```powershell
+python tools\phase17_cls_registry_test.py --url http://127.0.0.1:8084
+python tools\phase17_cls_smoke_test.py --url http://127.0.0.1:8084 --image .\images\bus.png
+python tools\run_phase17_regression.py --skip-phase16
+```
+
+Redis 验收：
+
+```powershell
+wsl -d Ubuntu -- redis-cli -h 172.19.196.109 -p 6379 XPENDING yolo:stream:cls yolo11_cls_group
+```
+
+阶段结果：
+
+```text
+CLS registry test：PASS
+CLS smoke test：PASS
+Phase 17 Regression Summary：success=True
+metrics_found=true
+total_tasks=3
+total_tasks_done=3
+total_tasks_failed=0
+worker_distribution.cls_worker_1=3
+XPENDING=0
+```
+
+---
+
+### Phase 17.5：POSE 图片异步服务
+
+Phase 17.5 在 CLS 已接入的基础上继续接入 YOLO11 Pose。POSE 与 CLS 的不同在于，它仍然有 bbox，但每个检测对象还携带 17 个 COCO keypoints 和骨架连接关系。因此它继续复用 `ModelOutput.detections`，但在 ResultSerializer 中增加 keypoint / skeleton 输出。
+
+POSE 服务规划：
+
+```text
+POSE Server：yolo11_server.exe + config/server_pose.yaml，端口 8085
+POSE Worker：yolo11_worker.exe + config/worker_pose.yaml
+Redis Stream：yolo:stream:pose
+Consumer Group：yolo11_pose_group
+Consumer Name：pose_worker_1
+Worker Group：image_pose_gpu0
+Task Kind：image_async
+Stream Type：redis_stream
+```
+
+新增接口：
+
+| 方法 | 接口 | 说明 |
+|---|---|---|
+| POST | `/api/v1/pose/image/async` | 上传图片并提交异步姿态估计任务 |
+| GET | `/api/v1/result/{task_id}` | 查询姿态估计结果 |
+| GET | `/api/v1/result/{task_id}/image` | 下载绘制 bbox/keypoints/skeleton 的结果图 |
+| GET | `/api/v1/ready?model=pose&task_kind=image_async&worker_group=image_pose_gpu0` | 检查 POSE Worker 是否就绪 |
+| GET | `/api/v1/workers?model=pose` | 查看 POSE Worker heartbeat |
+| GET | `/api/v1/metrics?model=pose` | 查看 POSE 任务统计 |
+
+### POSE 主要代码改动
+
+| 文件 | 内容 |
+|---|---|
+| `include/yolo11_pose_api.h` | 新增 POSE Runtime API 头文件 |
+| `api/yolo11_pose_api.cpp` | 封装原始 `yolo11_pose.cpp` 推理逻辑 |
+| `include/server/model_runner.h` | 新增 `PoseModelRunner` |
+| `src/server/model_runner.cpp` | `createModelRunner("pose")` 返回 POSE Runner |
+| `src/server/result_serializer.cpp` | 新增 pose JSON 输出：bbox、keypoints、skeleton |
+| `src/server/http_controller.cpp` | 注册 `/api/v1/pose/image/async` |
+| `labels/pose_coco.txt` | POSE 类别标签，当前为 `person` |
+| `config/server_pose.yaml` | POSE Server 配置，端口 8085 |
+| `config/worker_pose.yaml` | POSE Worker 配置 |
+| `scripts/start_pose.ps1` / `stop_pose.ps1` | POSE 独立启动 / 停止脚本 |
+| `tools/phase17_5_pose_registry_test.py` | POSE Worker Registry 测试 |
+| `tools/phase17_5_pose_smoke_test.py` | POSE 端到端 smoke 测试 |
+| `tools/run_phase17_5_regression.py` | POSE + CLS + Phase16 全量回归入口 |
+
+### POSE 返回结果语义
+
+POSE 结果的关键字段：
+
+```text
+model_type = pose
+pose_coordinate_system = original_image_pixels
+keypoint_format = coco17_xy_conf
+skeleton_format = coco17_pairs
+num_poses = 3
+detections[].bbox
+detections[].keypoints
+detections[].skeleton
+detections[].valid_keypoints
+```
+
+每个 keypoint 包含：
+
+```text
+id
+name
+x
+y
+confidence
+visible
+in_image
+```
+
+其中 `visible` 是根据置信度阈值判断的逻辑可见性，`in_image` 表示坐标是否落在原图范围内。坐标已经从模型输入坐标还原到原始图片像素坐标。
+
+### POSE 验收命令
+
+启动：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_pose.ps1 -ExeDir .\out\build\x64-Debug
+```
+
+检查：
+
+```powershell
+curl.exe "http://127.0.0.1:8085/api/v1/health"
+curl.exe "http://127.0.0.1:8085/api/v1/ready?model=pose&task_kind=image_async&worker_group=image_pose_gpu0"
+curl.exe "http://127.0.0.1:8085/api/v1/workers?model=pose"
+curl.exe "http://127.0.0.1:8085/api/v1/metrics?model=pose"
+```
+
+提交任务：
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8085/api/v1/pose/image/async" `
+  -H "Content-Type: image/png" `
+  --data-binary "@D:/tensorrtx/yolo11/images/bus.png"
+```
+
+自动测试：
+
+```powershell
+python tools\phase17_5_pose_registry_test.py --url http://127.0.0.1:8085
+python tools\phase17_5_pose_smoke_test.py --url http://127.0.0.1:8085 --image .\images\bus.png
+python tools\run_phase17_5_regression.py --skip-phase17
+```
+
+Redis 验收：
+
+```powershell
+wsl -d Ubuntu -- redis-cli -h 172.19.196.109 -p 6379 XPENDING yolo:stream:pose yolo11_pose_group
+```
+
+阶段结果：
+
+```text
+POSE registry test：PASS
+POSE smoke test：PASS
+Phase 17.5 Regression Summary：success=True
+num_poses=3
+每个 person 返回 17 个 COCO keypoints
+metrics_found=true
+total_tasks=3
+total_tasks_done=3
+total_tasks_failed=0
+worker_distribution.pose_worker_1=3
+XPENDING=0
+```
+
+---
+
+### Phase 17.5 全量回归
+
+Phase 17.5 最终不只验证 POSE，还验证新增 POSE 没有破坏 Phase 17 CLS 和 Phase 16 的旧服务。
+
+启动旧服务、CLS、POSE：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_all.ps1 -ExeDir .\out\build\x64-Debug
+powershell -ExecutionPolicy Bypass -File .\scripts\start_cls.ps1 -ExeDir .\out\build\x64-Debug
+powershell -ExecutionPolicy Bypass -File .\scripts\start_pose.ps1 -ExeDir .\out\build\x64-Debug
+```
+
+完整回归：
+
+```powershell
+python tools\run_phase17_5_regression.py
+```
+
+最终结果：
+
+```text
+Phase 17.5 Regression Summary: success=True
+[PASS] 01_phase17_5_pose_registry
+[PASS] 02_phase17_5_pose_smoke
+[PASS] 03_phase17_cls_regression
+```
+
+其中 Phase 17 CLS 回归内部继续调用 Phase 16 Full Regression，因此同时覆盖：
+
+```text
+Detect 图片异步
+OBB 图片异步
+Video 文件异步
+Stream 实时流
+CLS 图片异步
+POSE 图片异步
+Worker Registry
+Metrics / Ready / Workers
+Redis Pending
+```
+
+停止所有服务：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\stop_pose.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\stop_cls.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\stop_all.ps1
+```
+
+---
+
+### Phase 17 / 17.5 遇到的问题与解决方案
+
+#### 1. 分类结果显示 `class_608`，不是具体 ImageNet 类名
+
+原因：当前 `labels/imagenet.txt` 使用 `class_0` 到 `class_999` 的占位标签。这样可以保证服务链路先跑通，但语义显示不完整。
+
+解决：后续真实部署时，将 `labels/imagenet.txt` 替换为真实 ImageNet 1000 类标签文件。
+
+反思：labels 文件和 engine 是一组部署资产。模型能推理不代表类别语义已经正确。
+
+#### 2. `phase` 字段要区分服务阶段
+
+CLS 起初可能仍显示旧的：
+
+```text
+phase = phase15_worker_capability_registry
+```
+
+这不影响功能，但不利于文档和接口观测。最终建议 CLS 显示：
+
+```text
+phase = phase17_cls_image_async_service
+```
+
+POSE 显示：
+
+```text
+phase = phase17_5_pose_image_async_service
+```
+
+反思：`phase` 字段虽然不是业务逻辑，但它是工程回溯的重要观测字段。
+
+#### 3. `recent_done_count=0` 不等于任务失败
+
+metrics 中的：
+
+```text
+recent_window_seconds = 60
+recent_done_count = 0
+recent_qps_60s = 0.0
+```
+
+只代表最近 60 秒没有新完成任务。如果任务完成时间已经超过 60 秒，这是正常结果。判断累计成功应看：
+
+```text
+total_tasks_done
+total_tasks_failed
+worker_distribution
+last_task_id
+last_finish_time_ms
+```
+
+反思：metrics 要理解统计窗口，不能只看一个字段。
+
+#### 4. Worker `processed_count=0` 也可能正常
+
+停止并重新启动 Worker 后，heartbeat 中的 `processed_count` 会从 0 开始，因为它属于当前进程生命周期计数。但 Redis metrics 中的 `total_done` 是累计统计，不会因为进程重启归零。
+
+反思：进程级计数和 Redis 持久累计计数不是同一个口径。
+
+#### 5. POSE GPU 后处理暂不启用
+
+原始 `yolo11_pose.cpp` 中已经说明 pose GPU postprocess 当前不支持，因此 Phase 17.5 采用 CPU 后处理。即使配置中存在 `use_gpu_postprocess`，POSE 服务化第一版也应优先保证正确性和稳定性。
+
+反思：服务化阶段不要为了追求性能强行启用未验证路径。正确性优先，性能后置。
+
+#### 6. WSL localhost 代理提示不是 Redis 错误
+
+执行 WSL Redis CLI 时可能出现：
+
+```text
+wsl: 检测到 localhost 代理配置，但未镜像到 WSL。NAT 模式下的 WSL 不支持 localhost 代理。
+```
+
+只要后续 Redis 命令返回 `PONG` 或 `XPENDING=0`，这个提示不影响验收。
+
+反思：终端环境 warning 和服务错误要区分，不要看到 warning 就误判系统失败。
+
+### Phase 17 / 17.5 阶段结论
+
+```text
+Phase 17.0 已完成 CLS 图片异步服务接入。
+Phase 17.5 已完成 POSE 图片异步服务接入。
+```
+
+当前系统已经具备 Detect / OBB / CLS / POSE 四类图片异步服务，以及 Detect 视频文件异步服务和单路实时流服务。新增 CLS 和 POSE 后，旧的 Detect / OBB / Video / Stream 全量回归仍然通过，说明 `ModelOutput` 抽象、Runner 工厂、ResultSerializer 和 Worker 主循环的修改没有破坏旧功能。Phase 17.5 是项目从“四类工程服务”走向“YOLO 五大基础任务接口补齐”的关键节点。
+
+下一阶段建议进入：
+
+```text
+Phase 18.0：SEG 图片异步服务
+```
+
+Phase 18 需要重点控制：
+
+```text
+mask / polygon 输出格式
+JSON 体积
+结果图 overlay
+Redis Binary 与本地文件存储策略
+mask 是否单独下载
+SEG 与 Detect/OBB/CLS/POSE 的统一回归
 ```
 
 ---
@@ -5138,6 +5653,372 @@ cmake --build out\build\x64-Debug --config Debug --target yolo11_server --parall
 
 反思：实时流任务的 done/failed 不发生在 XACK 时，而发生在 `stopped/failed` 终态，所以 metrics 必须写在 stream 的终态函数里。
 
+
+## Phase 16：工程封板与上线前整理
+
+### 阶段定位
+
+Phase 16 不是继续新增模型能力，也不是修改 Detect / OBB / Video / Stream 的 C++ 主业务链路，而是把 Phase 15 已经跑通的四类服务整理成一个可重复启动、可统一检查、可一键回归、可稳定停止的工程封板版本。
+
+这一阶段的核心目标可以概括为：
+
+```text
+让项目从“我知道怎么手动启动”升级为“任何人按固定脚本都能启动、检查、回归和停止”。
+```
+
+Phase 16 的意义在于给后续 CLS / Pose / Seg 接入建立一条“保险绳”。后续每新增一个模型，都必须先跑 Phase 16 全量回归，确认 Detect / OBB / Video / Stream 旧功能没有被破坏。
+
+### 本阶段完成内容
+
+| 模块 | 新增 / 修改内容 | 作用 |
+|---|---|---|
+| 启动脚本 | `scripts/start_all.ps1` | 一键启动 Detect / OBB / Video / Stream 的 4 个 Server 和 4 个 Worker |
+| 停止脚本 | `scripts/stop_all.ps1` | 根据 PID 文件停止服务，并支持按进程名 / 端口兜底清理 |
+| 检查脚本 | `scripts/check_all.ps1` | 统一检查 HTTP health / ready / workers / metrics 与 Redis PING / XPENDING |
+| 清理脚本 | `scripts/clean_runtime.ps1` | 清理 runtime / reports 等运行产物，辅助重新测试 |
+| 全量回归 | `tools/run_full_regression.py` | 串联 Phase 12 / 13 / 14 / 15 的核心测试脚本 |
+| 配置模板 | `config/*.example.yaml` | 提供可迁移配置模板，减少本机绝对路径依赖 |
+| 报告归档 | `reports/phase16/<timestamp>/` | 保存 full regression 的 JSON / TXT 报告 |
+| PID 归档 | `runtime/pids/phase16_services.json` | 记录一键启动的 8 个进程 PID，供 stop_all 使用 |
+| 进程日志 | `runtime/logs/phase16_process/` | 记录各进程 stdout / stderr，方便启动失败排查 |
+
+### Phase 16 标准操作流程
+
+完整闭环只有四步：
+
+```powershell
+cd D:\tensorrtx\yolo11
+
+powershell -ExecutionPolicy Bypass -File .\scripts\start_all.ps1 -ExeDir .\out\build\x64-Debug
+powershell -ExecutionPolicy Bypass -File .\scripts\check_all.ps1 -UseWslRedisCli -WslDistro Ubuntu
+python tools\run_full_regression.py
+powershell -ExecutionPolicy Bypass -File .\scripts\stop_all.ps1
+```
+
+这四步分别对应：
+
+```text
+启动所有服务 -> 检查所有服务 -> 执行全量回归 -> 停止所有服务
+```
+
+### start_all.ps1 逻辑
+
+`start_all.ps1` 会按照固定顺序启动 8 个进程：
+
+```text
+worker_detect       yolo11_worker.exe        config\worker_detect.yaml --consumer-name worker_1
+worker_obb          yolo11_worker.exe        config\worker_obb.yaml --consumer-name obb_worker_1
+worker_video        yolo11_video_worker.exe  config\worker_video.yaml --consumer-name video_worker_1
+worker_stream       yolo11_stream_worker.exe config\worker_stream.yaml --consumer-name stream_worker_1
+server_detect_8080  yolo11_server.exe        config\server_detect.yaml
+server_obb_8081     yolo11_server.exe        config\server_obb.yaml
+server_video_8082   yolo11_server.exe        config\server_video.yaml
+server_stream_8083  yolo11_server.exe        config\server_stream.yaml
+```
+
+启动成功后，会写入：
+
+```text
+runtime/pids/phase16_services.json
+runtime/logs/phase16_process/
+```
+
+这一步解决了之前“必须手动打开多个 PowerShell 窗口、靠记忆启动服务”的问题。
+
+### check_all.ps1 逻辑
+
+`check_all.ps1` 主要做两类检查。
+
+第一类是 HTTP 检查：
+
+```text
+GET /api/v1/health
+GET /api/v1/ready
+GET /api/v1/workers
+GET /api/v1/metrics
+```
+
+覆盖四个端口：
+
+```text
+8080 detect
+8081 obb
+8082 video
+8083 stream
+```
+
+第二类是 Redis 检查：
+
+```text
+PING
+XPENDING yolo:stream:detect yolo11_group
+XPENDING yolo:stream:obb yolo11_obb_group
+XPENDING yolo:stream:video:detect yolo11_video_detect_group
+XPENDING yolo:stream:live:detect yolo11_stream_detect_group
+```
+
+最终验收结果：
+
+```text
+detect  health=True ready=True workers=1 metrics=True
+obb     health=True ready=True workers=1 metrics=True
+video   health=True ready=True workers=1 metrics=True
+stream  health=True ready=True workers=1 metrics=True
+
+PING: PONG
+XPENDING detect = 0
+XPENDING obb    = 0
+XPENDING video  = 0
+XPENDING stream = 0
+
+PASS: all services are ready and Redis pending looks clean.
+```
+
+注意：当前 `/health` 中仍然显示：
+
+```text
+phase = phase15_worker_capability_registry
+```
+
+这是正常现象。Phase 16 没有修改 C++ 主链路，只是在工程脚本和回归层面进行封板整理，所以 C++ 服务内部 phase 字段仍保持 Phase 15。
+
+### run_full_regression.py 逻辑
+
+`tools/run_full_regression.py` 是 Phase 16 最重要的测试入口，它不是重新写测试，而是串联已有阶段脚本：
+
+```text
+01_phase12_detect_obb_smoke
+02_phase13_video_smoke
+03_phase13_5_video_cancel
+04_phase14_stream_source_matrix
+06_registry_detect
+07_registry_obb
+08_registry_video
+09_registry_stream
+```
+
+最终通过结果：
+
+```text
+Phase 16 Full Regression Summary
+success=True
+```
+
+报告输出：
+
+```text
+reports/phase16/20260709_002239/phase16_full_regression_summary.json
+```
+
+这说明 Detect / OBB 图片异步服务、Video 文件任务、Video cancel、Stream file source、四类 Worker Registry 均通过。
+
+### stop_all.ps1 逻辑
+
+`stop_all.ps1` 会优先读取：
+
+```text
+runtime/pids/phase16_services.json
+```
+
+然后按 PID 停止 `start_all.ps1` 启动的 8 个进程。如果 PID 文件不存在或进程已经退出，会给出 warning，但不会影响整体停止流程。
+
+如果端口或进程残留，可以使用兜底参数：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\stop_all.ps1 -KillByName -KillByPort
+```
+
+手动兜底：
+
+```powershell
+Get-Process yolo11_server,yolo11_worker,yolo11_video_worker,yolo11_stream_worker -ErrorAction SilentlyContinue | Stop-Process -Force
+```
+
+### 本阶段技术栈与知识点
+
+| 技术点 | 本阶段用途 | 学习价值 |
+|---|---|---|
+| PowerShell 脚本 | 启动、停止、检查服务 | 将手动操作固化成可复现流程 |
+| WSL Redis CLI | 从 Windows 调用 Ubuntu 中的 redis-cli | 解决 Windows 没有 redis-cli 的问题 |
+| Redis XPENDING | 检查四条队列是否有未确认消息 | 判断异步服务是否有任务残留 |
+| HTTP health/ready/workers/metrics | 统一检查服务状态 | 区分服务存活、服务可用、Worker 在线和指标状态 |
+| Python subprocess | 串联阶段测试脚本 | 形成全量回归入口 |
+| JSON 报告 | 保存回归结果 | 方便阶段归档和后续对比 |
+| PID 文件 | 记录脚本启动的进程 | 支持自动停止服务 |
+| 配置模板 | `*.example.yaml` | 降低本机路径耦合，方便后续部署迁移 |
+
+### 遇到的问题与解决方案
+
+#### 1. PowerShell 找不到 redis-cli
+
+现象：
+
+```text
+无法将“redis-cli”项识别为 cmdlet、函数、脚本文件或可运行程序的名称
+```
+
+原因：Windows PowerShell 环境没有安装 Redis CLI，而 Redis 实际运行在 WSL Ubuntu 中。
+
+解决：使用 WSL 模式调用 Redis CLI：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\check_all.ps1 -UseWslRedisCli -WslDistro Ubuntu
+```
+
+手动验证：
+
+```powershell
+wsl -d Ubuntu -- redis-cli -h 172.19.196.109 -p 6379 ping
+```
+
+期望：
+
+```text
+PONG
+```
+
+#### 2. 默认 WSL 进入 docker-desktop
+
+现象：
+
+```text
+/bin/ash: redis-cli: not found
+```
+
+原因：`wsl -l -v` 显示默认发行版是 `docker-desktop`，而不是 `Ubuntu`。
+
+解决：显式指定发行版：
+
+```powershell
+wsl -d Ubuntu -- redis-cli -h 172.19.196.109 -p 6379 ping
+```
+
+或者在检查脚本中使用：
+
+```powershell
+-WslDistro Ubuntu
+```
+
+#### 3. WSL localhost 代理 warning
+
+现象：
+
+```text
+wsl: 检测到 localhost 代理配置，但未镜像到 WSL。NAT 模式下的 WSL 不支持 localhost 代理。
+```
+
+判断：这不是 Redis 错误。只要后面返回 `PONG`，Redis 就是通的。
+
+#### 4. check_all.ps1 卡在 Redis checks
+
+现象：脚本显示：
+
+```text
+=== Redis checks ===
+```
+
+然后长时间没有输出。
+
+原因：早期脚本调用 WSL Redis CLI 时，Redis 命令参数没有正确传入，实际执行成了：
+
+```text
+redis-cli -h 172.19.196.109 -p 6379
+```
+
+缺少 `PING` 或 `XPENDING`，导致 `redis-cli` 进入等待输入状态。
+
+解决：修复脚本参数传递，将容易冲突的参数变量改成明确的 `$RedisArgs`，并增加命令超时，避免无限卡住。
+
+#### 5. stop_all.ps1 报 `$Pid` 只读
+
+现象：
+
+```text
+无法覆盖变量 Pid，因为该变量为只读变量或常量。
+```
+
+原因：PowerShell 内置 `$PID` 是只读变量，脚本函数参数使用 `$Pid`，PowerShell 变量名大小写不敏感，因此发生冲突。
+
+解决：将函数参数从 `$Pid` 改为 `$ProcessId`。
+
+反思：PowerShell 脚本中不要使用 `$PID` / `$Host` / `$Error` 等容易与内置变量冲突的名称。
+
+### Phase 16 最终测试结果
+
+`check_all.ps1` 结果：
+
+```text
+detect  True  True  1  True  phase15_worker_capability_registry
+obb     True  True  1  True  phase15_worker_capability_registry
+video   True  True  1  True  phase15_worker_capability_registry
+stream  True  True  1  True  phase15_worker_capability_registry
+
+PING: PONG
+
+detect pending = 0
+obb    pending = 0
+video  pending = 0
+stream pending = 0
+
+PASS: all services are ready and Redis pending looks clean.
+```
+
+`run_full_regression.py` 结果：
+
+```text
+[PASS] 01_phase12_detect_obb_smoke
+[PASS] 02_phase13_video_smoke
+[PASS] 03_phase13_5_video_cancel
+[PASS] 04_phase14_stream_source_matrix
+[PASS] 06_registry_detect
+[PASS] 07_registry_obb
+[PASS] 08_registry_video
+[PASS] 09_registry_stream
+
+Phase 16 Full Regression Summary
+success=True
+```
+
+`stop_all.ps1` 结果：
+
+```text
+Stop request completed.
+```
+
+最终结论：
+
+```text
+Phase 16.0：工程封板与上线前整理 —— 已完成并通过验收。
+```
+
+### Phase 16 学习反思
+
+1. 工程后期最重要的不是继续堆功能，而是保证已有功能可以被稳定启动、验证和停止。
+2. 一键启动脚本的价值很高，它把“靠记忆打开多个窗口”变成了可复现流程。
+3. `/health`、`/ready`、`/workers`、`/metrics` 四类接口要一起看，单看 health 不足以说明服务可用。
+4. Redis `XPENDING=0` 仍然是异步系统封板验收的关键指标。
+5. 全量回归脚本是后续接 CLS / Pose / Seg 的保险绳，新增模型后必须先跑旧功能回归。
+6. PowerShell 脚本也会有工程坑，例如 WSL 默认发行版、参数传递、只读变量名冲突。
+7. 配置模板和相对路径不是形式主义，而是为了让项目脱离“只能在自己电脑上跑”的状态。
+8. Phase 16 之后，项目已经具备上线候选版本的基本形态；后续应进入五模型补齐，而不是继续扩张平台功能。
+
+### Phase 16 之后的推进建议
+
+下一阶段进入：
+
+```text
+Phase 17.0：CLS 图片异步服务接入
+```
+
+建议开发原则：
+
+```text
+先接 CLS 图片异步接口，不做视频分类、不做流分类；
+先保证 top1 / topk JSON 正确，不追求复杂结果图；
+接入后必须执行 Phase 16 全量回归；
+旧的 Detect / OBB / Video / Stream 全部 PASS 后，才能标记 Phase 17 完成。
+```
+
 ## Git Ignore
 
 以下生成文件不建议上传到 GitHub：
@@ -5188,25 +6069,29 @@ Structure Cleanup：config 清理与 runtime 目录统一
 Phase 14.0：RTSP / 摄像头流任务最小闭环
 Phase 14.5：流任务稳定性增强、重复启动保护与重连失败处理
 Phase 15：Worker Capability Registry、能力过滤、四类服务统一观测与真实任务验收
+Phase 16：工程封板与上线前整理，一键启动/检查/回归/停止，全量回归 success=True
+Phase 17：CLS 图片异步服务接入，ModelOutput 最小抽象，top1/topk 输出
+Phase 17.5：POSE 图片异步服务接入，COCO17 keypoints/skeleton 输出，全量回归 success=True
 ```
 
 下一步建议进入：
 
 ```text
-Phase 16：生产化增强前置
+Phase 18：SEG 图片异步服务接入
 ```
 
-Phase 16 推荐目标：
+Phase 18 推荐目标：
 
 ```text
-生产化增强前置
-├── Storage 抽象：图片、视频、流截图统一存储接口
-├── 服务启动 / 停止脚本标准化
-├── Redis key 与 runtime 文件清理策略
-├── 日志目录、日志级别、运行报告规范化
-├── metrics 字段继续对齐，预留 Prometheus 接入
-├── 配置模板整理，减少阶段历史配置干扰
-└── 暂不急着做多 GPU 自动调度，先把单机四服务部署形态封干净
+SEG 图片异步服务接入
+├── 新增 Yolo11SegDetector API 包装
+├── 新增 SegModelRunner，接入现有 IModelRunner / ModelOutput 体系
+├── 新增 ResultSerializer::serializeSeg，输出 bbox + mask/polygon metadata
+├── 新增 config/server_seg.yaml 与 config/worker_seg.yaml
+├── 新增 POST /api/v1/segment/image/async
+├── 新增 SEG registry / ready / metrics 验证脚本
+├── 结果图优先返回 overlay，不建议第一版把完整 mask 矩阵直接塞进 JSON
+└── 每次接入后必须跑 Phase 17.5 全量回归，确认 Detect / OBB / CLS / POSE / Video / Stream 均未被破坏
 ```
 
 后续扩展方向：
